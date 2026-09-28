@@ -2,6 +2,7 @@
 //! [`ts_core::Provider`] trait.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::RwLock as StdRwLock;
 use std::time::{Duration, Instant};
 
@@ -92,7 +93,7 @@ pub struct CodexProvider {
     config: CodexConfig,
     pricing: SharedPricing,
     env: CodexEnv,
-    inner: TokioMutex<Inner>,
+    inner: Arc<TokioMutex<Inner>>,
     cached: StdRwLock<Cached>,
     ledger: StdRwLock<TokenLedger>,
     scheduling: StdRwLock<Scheduling>,
@@ -110,13 +111,13 @@ impl CodexProvider {
             config,
             pricing,
             env,
-            inner: TokioMutex::new(Inner {
+            inner: Arc::new(TokioMutex::new(Inner {
                 session: None,
                 process_backoff: Backoff::new(Duration::from_secs(5), Duration::from_secs(300)),
                 limits_backoff: Backoff::new(Duration::from_secs(60), Duration::from_secs(1800)),
                 scanner: RolloutScanner::new(),
                 last_rollout_rate_limits: None,
-            }),
+            })),
             cached: StdRwLock::new(Cached::default()),
             ledger: StdRwLock::new(TokenLedger::new()),
             scheduling: StdRwLock::new(Scheduling::default()),
@@ -255,6 +256,7 @@ impl Provider for CodexProvider {
             }
         };
         drop(inner);
+        self.schedule_idle_shutdown();
         self.scheduling.write().unwrap().backoff_resume_at = resume_at;
 
         match attempt {
@@ -361,6 +363,32 @@ impl Provider for CodexProvider {
 }
 
 impl CodexProvider {
+    /// In on-demand mode, stop the app-server child once it has been idle for
+    /// `linger_secs`: it holds ~150 MB while alive and a tray monitor polls
+    /// only every few minutes.
+    fn schedule_idle_shutdown(&self) {
+        if self.config.process_mode != CodexProcessMode::OnDemand {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let inner = Arc::clone(&self.inner);
+        let linger = Duration::from_secs(self.config.linger_secs);
+        runtime.spawn(async move {
+            tokio::time::sleep(linger).await;
+            let mut guard = inner.lock().await;
+            let idle = guard
+                .session
+                .as_ref()
+                .is_some_and(|session| session.last_used.elapsed() >= linger);
+            if idle {
+                guard.session = None;
+                tracing::debug!("stopped idle codex app-server");
+            }
+        });
+    }
+
     fn publish(&self, cached: Cached) {
         let earliest_reset_at = cached.windows.iter().filter_map(|w| w.resets_at).min();
         self.scheduling.write().unwrap().earliest_reset_at = earliest_reset_at;

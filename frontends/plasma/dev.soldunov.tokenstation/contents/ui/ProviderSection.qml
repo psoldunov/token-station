@@ -3,6 +3,11 @@
     SPDX-License-Identifier: MIT
 
     Everything the popup shows about one provider.
+
+    The heading is PlasmaExtras.ListSectionHeader with the plan as trailing
+    content, the same component the device notifier uses to separate groups. The
+    body rows follow powerdevil's BatteryItem: primary PlasmaComponents3.Label
+    with a dimmed smallFont label beside it, no custom colours or frames.
 */
 pragma ComponentBehavior: Bound
 
@@ -31,8 +36,6 @@ ColumnLayout {
     readonly property var breakdown: provider && provider.breakdown ? provider.breakdown : []
     readonly property var credits: provider ? provider.credits : null
 
-    spacing: Kirigami.Units.smallSpacing
-
     function messageType(state) {
         switch (state) {
         case "error":
@@ -45,39 +48,23 @@ ColumnLayout {
         }
     }
 
-    RowLayout {
+    spacing: Kirigami.Units.smallSpacing
+
+    PlasmaExtras.ListSectionHeader {
         Layout.fillWidth: true
-        spacing: Kirigami.Units.smallSpacing
+        label: root.provider && root.provider.name ? root.provider.name : ""
 
-        Kirigami.Heading {
-            Layout.fillWidth: true
-            level: 4
-            text: root.provider && root.provider.name ? root.provider.name : ""
-            elide: Text.ElideRight
-            maximumLineCount: 1
-        }
-
-        // Plan chip, in the same spirit as the tag pills used across Plasma popups.
-        Rectangle {
+        PlasmaExtras.DescriptiveLabel {
             visible: !!root.provider && !!root.provider.plan
-            radius: height / 2
-            color: Kirigami.Theme.alternateBackgroundColor
-            implicitWidth: planLabel.implicitWidth + Kirigami.Units.smallSpacing * 3
-            implicitHeight: planLabel.implicitHeight + Kirigami.Units.smallSpacing
-
-            PlasmaComponents3.Label {
-                id: planLabel
-
-                anchors.centerIn: parent
-                text: root.provider && root.provider.plan ? root.provider.plan : ""
-                font: Kirigami.Theme.smallFont
-                color: Kirigami.Theme.textColor
-            }
+            text: root.provider && root.provider.plan ? root.provider.plan : ""
+            textFormat: Text.PlainText
         }
     }
 
     Kirigami.InlineMessage {
         Layout.fillWidth: true
+        Layout.leftMargin: Kirigami.Units.largeSpacing
+        Layout.rightMargin: Kirigami.Units.largeSpacing
         type: root.messageType(root.providerState)
         text: root.hasMessage ? root.provider.message : ""
         visible: root.hasMessage
@@ -85,8 +72,11 @@ ColumnLayout {
 
     PlasmaExtras.DescriptiveLabel {
         Layout.fillWidth: true
+        Layout.leftMargin: Kirigami.Units.largeSpacing
+        Layout.rightMargin: Kirigami.Units.largeSpacing
         visible: root.windows.length === 0 && !root.hasMessage
         wrapMode: Text.WordWrap
+        textFormat: Text.PlainText
         text: root.providerState === "loading"
             ? i18nc("@info:status", "Reading plan limits…")
             : i18nc("@info:status", "No plan limits reported.")
@@ -101,19 +91,72 @@ ColumnLayout {
             required property var modelData
 
             Layout.fillWidth: true
-            Layout.topMargin: Kirigami.Units.smallSpacing
+            Layout.leftMargin: Kirigami.Units.largeSpacing
+            Layout.rightMargin: Kirigami.Units.largeSpacing
 
-            usageWindow: modelData
+            usageWindow: windowRow.modelData
             now: root.now
-            historyPoints: root.historyByWindow[modelData.id] !== undefined ? root.historyByWindow[modelData.id] : []
+            historyPoints: root.historyByWindow[windowRow.modelData.id] !== undefined
+                ? root.historyByWindow[windowRow.modelData.id]
+                : []
+        }
+    }
+
+    // Claude reports which surface consumed the session window.
+    ColumnLayout {
+        Layout.fillWidth: true
+        Layout.leftMargin: Kirigami.Units.largeSpacing
+        Layout.rightMargin: Kirigami.Units.largeSpacing
+        Layout.topMargin: Kirigami.Units.smallSpacing
+
+        visible: root.breakdown.length > 0
+        spacing: 0
+
+        PlasmaComponents3.Label {
+            Layout.fillWidth: true
+            text: i18nc("@title:group Which surfaces used the plan window", "Used by")
+            textFormat: Text.PlainText
+        }
+
+        Repeater {
+            model: root.breakdown
+
+            delegate: RowLayout {
+                id: breakdownRow
+
+                required property var modelData
+
+                Layout.fillWidth: true
+                spacing: Kirigami.Units.smallSpacing
+
+                PlasmaExtras.DescriptiveLabel {
+                    Layout.fillWidth: true
+                    text: breakdownRow.modelData.label
+                    textFormat: Text.PlainText
+                    font: Kirigami.Theme.smallFont
+                    elide: Text.ElideRight
+                }
+
+                PlasmaExtras.DescriptiveLabel {
+                    Layout.alignment: Qt.AlignRight
+                    text: Formatters.percent(breakdownRow.modelData.percent)
+                    textFormat: Text.PlainText
+                    font: Kirigami.Theme.smallFont
+                }
+            }
         }
     }
 
     PlasmaExtras.DescriptiveLabel {
         Layout.fillWidth: true
+        Layout.leftMargin: Kirigami.Units.largeSpacing
+        Layout.rightMargin: Kirigami.Units.largeSpacing
         Layout.topMargin: Kirigami.Units.smallSpacing
+
         visible: !!root.credits
         wrapMode: Text.WordWrap
+        textFormat: Text.PlainText
+        font: Kirigami.Theme.smallFont
         text: {
             if (!root.credits) {
                 return "";
@@ -134,47 +177,10 @@ ColumnLayout {
         }
     }
 
-    // Claude reports which surface consumed the session window.
-    ColumnLayout {
-        Layout.fillWidth: true
-        Layout.topMargin: Kirigami.Units.smallSpacing
-        visible: root.breakdown.length > 0
-        spacing: 0
-
-        PlasmaExtras.DescriptiveLabel {
-            Layout.fillWidth: true
-            text: i18nc("@title:group Which surfaces used the plan window", "Used by")
-        }
-
-        Repeater {
-            model: root.breakdown
-
-            delegate: RowLayout {
-                id: breakdownRow
-
-                required property var modelData
-
-                Layout.fillWidth: true
-                Layout.leftMargin: Kirigami.Units.gridUnit
-                spacing: Kirigami.Units.smallSpacing
-
-                PlasmaExtras.DescriptiveLabel {
-                    Layout.fillWidth: true
-                    text: breakdownRow.modelData.label
-                    elide: Text.ElideRight
-                    maximumLineCount: 1
-                }
-
-                PlasmaExtras.DescriptiveLabel {
-                    text: Formatters.percent(breakdownRow.modelData.percent)
-                    horizontalAlignment: Text.AlignRight
-                }
-            }
-        }
-    }
-
     TokenSummary {
         Layout.fillWidth: true
+        Layout.leftMargin: Kirigami.Units.largeSpacing
+        Layout.rightMargin: Kirigami.Units.largeSpacing
         Layout.topMargin: Kirigami.Units.smallSpacing
 
         tokens: root.provider ? root.provider.tokens : null

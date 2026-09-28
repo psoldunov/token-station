@@ -117,11 +117,7 @@ export class PopupContent {
         settingsItem.connect('activate', () => this._onOpenPreferences());
         menu.addMenuItem(settingsItem);
 
-        this._updatedLabel = new St.Label({
-            text: '',
-            style_class: 'token-station-footnote',
-            x_expand: true,
-        });
+        this._updatedLabel = dimLabel('');
         menu.addMenuItem(stackItem([this._updatedLabel], 'token-station-footer-item'));
     }
 
@@ -149,14 +145,10 @@ export class PopupContent {
         if (providers.length === 0) {
             this._providerSection.addMenuItem(this._buildPlaceholder(snapshot));
         } else {
-            providers.forEach((provider, index) => {
-                if (index > 0) {
-                    this._providerSection.addMenuItem(
-                        new PopupMenu.PopupSeparatorMenuItem());
-                }
+            for (const provider of providers) {
                 for (const item of this._buildProvider(provider, snapshot))
                     this._providerSection.addMenuItem(item);
-            });
+            }
         }
 
         this._refreshItem.setSensitive(snapshot !== null);
@@ -254,16 +246,18 @@ export class PopupContent {
             x_expand: true,
             y_align: Clutter.ActorAlign.CENTER,
         }));
-        const detail = new St.Label({
-            text: '',
-            style_class: 'token-station-dim',
+        const detail = dimLabel('', {
+            x_expand: false,
             y_align: Clutter.ActorAlign.CENTER,
         });
         topRow.add_child(detail);
 
         const percent = Number(window.usedPercent);
+        // `slider` is the Shell's own trough-and-fill style, the one the volume
+        // and brightness sliders in Quick Settings use, so the normal fill is
+        // the session's accent colour rather than a colour we picked.
         const level = new BarLevel.BarLevel({
-            style_class: 'token-station-level',
+            style_class: 'slider token-station-level',
             value: Number.isFinite(percent) ? Math.min(percent, 100) / 100 : 0,
             maximumValue: 1,
             x_expand: true,
@@ -347,9 +341,8 @@ export class PopupContent {
                 x_expand: true,
                 y_align: Clutter.ActorAlign.CENTER,
             }));
-            line.add_child(new St.Label({
-                text: detail,
-                style_class: 'token-station-dim',
+            line.add_child(dimLabel(detail, {
+                x_expand: false,
                 y_align: Clutter.ActorAlign.CENTER,
             }));
             item.menu.addMenuItem(stackItem([line], 'token-station-model-item'));

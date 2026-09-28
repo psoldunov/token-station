@@ -133,8 +133,10 @@ PlasmoidItem {
         refreshing: daemon.refreshing
         now: root.now
         errorMessage: daemon.lastError
-        title: root.toolTipMainText
+        appletTitle: root.toolTipMainText
         configureAction: Plasmoid.internalAction("configure")
+        // The system tray draws the applet title and configure button itself.
+        containmentDrawsHeading: (Plasmoid.containmentDisplayHints & PlasmaCore.Types.ContainmentDrawsPlasmoidHeading) !== 0
         onRefreshRequested: daemon.refresh()
         onHistoryRequested: (provider, windowId, since, callback) => daemon.history(provider, windowId, since, callback)
     }

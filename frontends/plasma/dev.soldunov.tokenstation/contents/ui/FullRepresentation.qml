@@ -78,7 +78,7 @@ PlasmaExtras.Representation {
                 const span = usageWindow.kind === "weekly" ? root.weeklyHistorySeconds : root.sessionHistorySeconds;
                 const key = provider.id + "/" + usageWindow.id;
                 root.historyRequested(provider.id, usageWindow.id, Math.floor(root.now - span), (points, error) => {
-                    if (error.length > 0 || !Array.isArray(points)) {
+                    if (error.length > 0 || !points || points.length === undefined) {
                         return;
                     }
                     // Replace rather than mutate, so bindings on historyCache re-run.

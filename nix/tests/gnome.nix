@@ -199,6 +199,23 @@ pkgs.testers.runNixOSTest {
         machine.screenshot("open-dark")
         evaluate(f"Main.panel.statusArea[{UUID!r}].menu.close()")
 
+    with subtest("Preferences open against the running service"):
+        set_color_scheme("default")
+        machine.succeed(user(f"gnome-extensions prefs {UUID}"))
+        machine.wait_until_succeeds(
+            user(
+                "gdbus call --session -d org.gnome.Shell -o /org/gnome/Shell "
+                "-m org.gnome.Shell.Eval "
+                + shlex.quote(
+                    "String(global.display.focus_window "
+                    "&& global.display.focus_window.wm_class)"
+                )
+            )
+            + " | grep -qi 'shell.extensions'"
+        )
+        machine.sleep(3)
+        machine.screenshot("prefs")
+
     with subtest("Still no JS errors from the extension"):
         machine.fail(
             "journalctl -b --no-pager | grep -E 'JS ERROR' | grep -q token-station"

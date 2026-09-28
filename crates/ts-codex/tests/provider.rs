@@ -457,3 +457,53 @@ async fn live_app_server_round_trip() {
     );
     assert_ne!(snapshot.state, ProviderState::Loading);
 }
+
+fn process_alive(pid: &str) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/status"))
+        .map(|status| {
+            !status
+                .lines()
+                .any(|l| l.starts_with("State:") && l.contains('Z'))
+        })
+        .unwrap_or(false)
+}
+
+#[tokio::test]
+async fn on_demand_stops_idle_child_after_linger() {
+    let dir = tempfile::tempdir().unwrap();
+    let spawn_log = dir.path().join("spawns.log");
+    let pid_file = dir.path().join("pid");
+    let steps = [
+        init_step(),
+        account_step(2, with_id(apikey_account_body(), 2)),
+    ];
+    let binary = write_fake_codex(dir.path(), "codex", &steps, &spawn_log);
+    let script = fs::read_to_string(&binary).unwrap().replacen(
+        "#!/bin/sh\n",
+        &format!("#!/bin/sh\necho $$ > '{}'\n", pid_file.display()),
+        1,
+    );
+    fs::write(&binary, script).unwrap();
+    let config = CodexConfig {
+        process_mode: CodexProcessMode::OnDemand,
+        linger_secs: 1,
+        ..CodexConfig::default()
+    };
+    let provider = CodexProvider::with_env(config, shared_bundled(), base_env(dir.path(), binary));
+
+    assert_eq!(
+        provider.refresh_limits(true).await,
+        ts_core::RefreshOutcome::Updated
+    );
+    let pid = fs::read_to_string(&pid_file).unwrap().trim().to_string();
+    assert!(
+        process_alive(&pid),
+        "child should linger right after a refresh"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(1_800)).await;
+    assert!(
+        !process_alive(&pid),
+        "idle child should be stopped after linger_secs"
+    );
+}

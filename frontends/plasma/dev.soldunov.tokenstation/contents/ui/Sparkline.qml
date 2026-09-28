@@ -16,17 +16,21 @@ Canvas {
     /*! `[[unixSeconds, percent], …]`, oldest first. */
     property var points: []
     property color lineColor: Kirigami.Theme.highlightColor
+    /*! Kept faint: the trace is context for the bar above it, not a chart. */
+    property real fillOpacity: 0.12
     /*! Percentage axis always spans the whole window, so traces stay comparable. */
     readonly property real maxPercent: 100
 
-    readonly property bool hasData: Array.isArray(points) && points.length >= 2
+    // See ModelBreakdown: Array.isArray() is not reliable across a `var` property.
+    readonly property bool hasData: !!points && points.length >= 2
 
-    implicitHeight: Kirigami.Units.gridUnit * 2
+    implicitHeight: Kirigami.Units.gridUnit
     visible: hasData
     antialiasing: true
 
     onPointsChanged: requestPaint()
     onLineColorChanged: requestPaint()
+    onFillOpacityChanged: requestPaint()
     onWidthChanged: requestPaint()
     onHeightChanged: requestPaint()
 
@@ -56,7 +60,7 @@ Canvas {
         }
         context.lineTo(width, height);
         context.closePath();
-        context.fillStyle = Qt.alpha(root.lineColor, 0.2);
+        context.fillStyle = Qt.alpha(root.lineColor, root.fillOpacity);
         context.fill();
 
         context.beginPath();

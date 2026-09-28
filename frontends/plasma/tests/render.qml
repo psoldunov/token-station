@@ -12,6 +12,8 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 
+import org.kde.kirigami as Kirigami
+
 Item {
     id: harness
 
@@ -35,9 +37,9 @@ Item {
     }
 
     /*!
-       The representations call i18n()/i18nc(), which only a KLocalizedContext
-       provides. Plain `qml` has none, so install pass-through shims on the JS
-       global object before any component is created.
+       Fallback for i18n()/i18nc() when no KLocalizedContext is installed. A real
+       context wins over these, because QML resolves context properties before the
+       global object; they only keep the harness rendering if KI18n is absent.
     */
     function installI18nShims() {
         const globalObject = (new Function("return this"))();
@@ -139,8 +141,12 @@ Item {
                 "height": 32
             };
 
-        const item = component.createObject(stage, properties);
+        // The real popup gets its background from the Plasma dialog; paint the
+        // theme background here so dark-scheme text is not white on white.
+        const backdrop = backdropComponent.createObject(stage, {});
+        const item = component.createObject(backdrop, properties);
         if (!item) {
+            backdrop.destroy();
             console.warn("FAILED to instantiate", componentPath);
             Qt.callLater(harness.runNext);
             return;
@@ -157,21 +163,34 @@ Item {
         const target = harness.outputDir + "/" + job.name + "-" + job.view + harness.suffix + ".png";
         // One frame for layout, one for the Canvas sparkline repaint.
         Qt.callLater(() => Qt.callLater(() => {
-            const grabbed = item.grabToImage(result => {
+            backdrop.width = item.width;
+            backdrop.height = item.height;
+            const grabbed = backdrop.grabToImage(result => {
                 if (!result.saveToFile(target)) {
                     console.warn("FAILED to save", target);
                 } else {
                     console.warn("wrote", target);
                 }
-                item.destroy();
+                backdrop.destroy();
                 Qt.callLater(harness.runNext);
-            }, Qt.size(item.width, item.height));
+            }, Qt.size(backdrop.width, backdrop.height));
             if (!grabbed) {
                 console.warn("FAILED to grab", target);
-                item.destroy();
+                backdrop.destroy();
                 Qt.callLater(harness.runNext);
             }
         }));
+    }
+
+    Component {
+        id: backdropComponent
+
+        Rectangle {
+            color: Kirigami.Theme.backgroundColor
+
+            Kirigami.Theme.colorSet: Kirigami.Theme.Window
+            Kirigami.Theme.inherit: false
+        }
     }
 
     Item {

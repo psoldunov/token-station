@@ -2,8 +2,10 @@
     SPDX-FileCopyrightText: 2026 Philipp Soldunov <philipp@theswisscheese.com>
     SPDX-License-Identifier: MIT
 
-    Token counters: this machine's local logs, plus the backend's all-device totals
-    where the provider reports them.
+    Token counters: this machine's local logs, plus the backend's all-device
+    totals where the provider reports them.
+
+    Dimmed smallFont labels, as powerdevil's BatteryItem uses for its detail rows.
 */
 pragma ComponentBehavior: Bound
 
@@ -29,10 +31,15 @@ ColumnLayout {
     visible: hasTokens || hasAccountTokens
     spacing: 0
 
-    PlasmaExtras.DescriptiveLabel {
+    component DetailLabel: PlasmaExtras.DescriptiveLabel {
         Layout.fillWidth: true
-        visible: root.hasTokens && !!root.tokens.today
+        font: Kirigami.Theme.smallFont
+        textFormat: Text.PlainText
         wrapMode: Text.WordWrap
+    }
+
+    DetailLabel {
+        visible: root.hasTokens && !!root.tokens.today
         text: root.hasTokens && root.tokens.today
             ? i18nc("@info Local token usage today, e.g. 'This device · today 43.3 M tokens · $31.42'",
                     "This device · today %1 tokens · %2",
@@ -41,10 +48,8 @@ ColumnLayout {
             : ""
     }
 
-    PlasmaExtras.DescriptiveLabel {
-        Layout.fillWidth: true
+    DetailLabel {
         visible: root.hasTokens && !!root.tokens.last7Days
-        wrapMode: Text.WordWrap
         text: root.hasTokens && root.tokens.last7Days
             ? i18nc("@info Local token usage over the last seven days",
                     "Last 7 days · %1 tokens · %2",
@@ -53,10 +58,8 @@ ColumnLayout {
             : ""
     }
 
-    PlasmaExtras.DescriptiveLabel {
-        Layout.fillWidth: true
+    DetailLabel {
         visible: root.hasAccountTokens
-        wrapMode: Text.WordWrap
         text: root.hasAccountTokens
             ? i18nc("@info Token usage the provider reports for the whole account",
                     "All devices · today %1 tokens",
@@ -66,7 +69,6 @@ ColumnLayout {
 
     ModelBreakdown {
         Layout.fillWidth: true
-        Layout.topMargin: Kirigami.Units.smallSpacing
         models: root.hasTokens && root.tokens.byModel ? root.tokens.byModel : []
     }
 }
