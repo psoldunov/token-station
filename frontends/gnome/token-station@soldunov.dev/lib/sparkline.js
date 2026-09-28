@@ -9,7 +9,7 @@ import {setColor, toRgba} from './draw.js';
 
 const DEFAULT_HEIGHT = 32;
 const LINE_WIDTH = 1.5;
-const FILL_ALPHA = 0.18;
+const FILL_ALPHA = 0.12;
 const BASELINE_ALPHA = 0.15;
 
 export const Sparkline = GObject.registerClass(

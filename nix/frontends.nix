@@ -34,7 +34,11 @@ in
   gnome-extension = stdenvNoCC.mkDerivation {
     pname = "gnome-shell-extension-token-station";
     inherit version;
-    src = ../frontends/gnome + "/${gnomeUuid}";
+    # A store path name cannot contain `@`, so name the source explicitly.
+    src = builtins.path {
+      name = "token-station-gnome-extension-src";
+      path = ../frontends/gnome + "/${gnomeUuid}";
+    };
     nativeBuildInputs = [ glib ];
     buildPhase = ''
       runHook preBuild

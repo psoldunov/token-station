@@ -22,7 +22,9 @@ let
   ];
   statuslineCommand =
     "${lib.getExe cfg.package} statusline"
-    + lib.optionalString (cfg.claudeStatusline.wrap != null) " --wrap ${lib.escapeShellArg cfg.claudeStatusline.wrap}";
+    + lib.optionalString (
+      cfg.claudeStatusline.wrap != null
+    ) " --wrap ${lib.escapeShellArg cfg.claudeStatusline.wrap}";
 in
 {
   options.programs.token-station = {

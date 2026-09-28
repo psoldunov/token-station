@@ -51,7 +51,11 @@ ColumnLayout {
     spacing: Kirigami.Units.smallSpacing
 
     PlasmaExtras.ListSectionHeader {
+        // Same horizontal inset as the rows below, the way the device notifier
+        // insets its section headers with the list's left/right margins.
         Layout.fillWidth: true
+        Layout.leftMargin: Kirigami.Units.largeSpacing
+        Layout.rightMargin: Kirigami.Units.largeSpacing
         label: root.provider && root.provider.name ? root.provider.name : ""
 
         PlasmaExtras.DescriptiveLabel {
@@ -93,6 +97,7 @@ ColumnLayout {
             Layout.fillWidth: true
             Layout.leftMargin: Kirigami.Units.largeSpacing
             Layout.rightMargin: Kirigami.Units.largeSpacing
+            Layout.topMargin: Kirigami.Units.smallSpacing
 
             usageWindow: windowRow.modelData
             now: root.now

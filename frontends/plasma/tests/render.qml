@@ -104,6 +104,12 @@ Item {
             jobs.push({ "name": name, "view": "full", "snapshot": snapshot, "daemonRunning": true, "percentText": false });
             jobs.push({ "name": name, "view": "compact", "snapshot": snapshot, "daemonRunning": true, "percentText": false });
             jobs.push({ "name": name, "view": "compact-percent", "snapshot": snapshot, "daemonRunning": true, "percentText": true });
+            // The per-model list starts collapsed in the popup, so render it on
+            // its own to check the expanded state.
+            const byModel = snapshot.providers[0].tokens ? snapshot.providers[0].tokens.byModel : null;
+            if (byModel && byModel.length > 0) {
+                jobs.push({ "name": name, "view": "models", "models": byModel });
+            }
         }
         // The daemon-missing placeholder has no fixture of its own.
         jobs.push({ "name": "daemon-missing", "view": "full", "snapshot": null, "daemonRunning": false, "percentText": false });
@@ -118,7 +124,9 @@ Item {
         const job = harness.queue[harness.queueIndex];
         harness.queueIndex += 1;
 
-        const componentPath = job.view === "full" ? "FullRepresentation.qml" : "CompactRepresentation.qml";
+        const componentPath = job.view === "full" ? "FullRepresentation.qml"
+                            : job.view === "models" ? "ModelBreakdown.qml"
+                            : "CompactRepresentation.qml";
         const component = Qt.createComponent(harness.uiDir + "/" + componentPath, Component.PreferSynchronous);
         if (component.status !== Component.Ready) {
             console.warn("FAILED to load", componentPath, component.errorString());
@@ -126,7 +134,13 @@ Item {
             return;
         }
 
-        const properties = job.view === "full"
+        const properties = job.view === "models"
+            ? {
+                "models": job.models,
+                "showModels": true,
+                "width": 320
+            }
+            : job.view === "full"
             ? {
                 "snapshot": job.snapshot,
                 "daemonRunning": job.daemonRunning,

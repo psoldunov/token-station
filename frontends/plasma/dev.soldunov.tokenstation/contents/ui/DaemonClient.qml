@@ -82,7 +82,9 @@ Item {
        `callback(points, errorMessage)` receives `[[unixSeconds, percent], …]`.
     */
     function history(provider, windowId, since, callback) {
-        const message = buildMessage("GetHistory", [String(provider), String(windowId), new DBus.uint64(since)], "sst");
+        // The signature is deduced from the DBus.uint64 wrapper; an explicit one
+        // has to be the parenthesised argument list, which is easy to get wrong.
+        const message = buildMessage("GetHistory", [String(provider), String(windowId), new DBus.uint64(since)]);
         DBus.SessionBus.asyncCall(message, reply => {
             let points = [];
             try {
@@ -119,7 +121,7 @@ Item {
        `callback(errorMessage)` is called with an empty string on success.
     */
     function setSettings(newSettings, callback) {
-        const message = buildMessage("SetSettings", [JSON.stringify(newSettings)], "s");
+        const message = buildMessage("SetSettings", [JSON.stringify(newSettings)]);
         DBus.SessionBus.asyncCall(message, reply => {
             if (callback) {
                 callback("");

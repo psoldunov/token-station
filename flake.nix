@@ -78,8 +78,15 @@
           );
           test = craneLib.cargoTest args;
           fmt = craneLib.cargoFmt { inherit (daemon.commonArgs) src; };
+          # Boots GNOME in a VM, enables the extension against a fixture daemon,
+          # asserts it loaded cleanly and renders the menu (needs KVM).
+          gnome-vm = import ./nix/tests/gnome.nix {
+            inherit pkgs;
+            tokenStation = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+            fixture = ./data/fixtures/snapshot-near-limit.json;
+          };
           nix-fmt = pkgs.runCommand "nix-fmt-check" { nativeBuildInputs = [ pkgs.nixfmt ]; } ''
-            nixfmt --check ${./flake.nix} ${./nix}/*.nix
+            nixfmt --check ${./flake.nix} ${./nix}/*.nix ${./nix/tests}/*.nix
             touch $out
           '';
         }

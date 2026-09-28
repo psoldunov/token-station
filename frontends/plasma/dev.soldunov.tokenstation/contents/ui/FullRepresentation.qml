@@ -137,11 +137,15 @@ PlasmaExtras.Representation {
                 }
             }
 
+            // Plasmoid.internalAction() hands back a QAction, which QQC2's
+            // `action` property will not accept; the system tray's own configure
+            // button drives it the same way, by hand.
             PlasmaComponents3.ToolButton {
                 visible: !root.containmentDrawsHeading && !!root.configureAction
-                action: root.configureAction
                 icon.name: "configure"
+                text: root.configureAction ? root.configureAction.text : ""
                 display: PlasmaComponents3.AbstractButton.IconOnly
+                onClicked: root.configureAction.trigger()
 
                 PlasmaComponents3.ToolTip {
                     text: parent.text
@@ -211,7 +215,7 @@ PlasmaExtras.Representation {
             width: parent.width - Kirigami.Units.gridUnit * 4
 
             visible: !root.daemonRunning
-            iconName: "cloud-offline-symbolic"
+            iconName: "state-offline"
             text: i18nc("@info:placeholder", "Token Station is not running")
             explanation: i18nc("@info:placeholder", "Start the service to see Claude Code and Codex usage.")
 
