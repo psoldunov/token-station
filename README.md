@@ -96,10 +96,12 @@ chmod +x TokenStation-x86_64.AppImage
 `~/.local/share`, registers the daemon (systemd user unit + D-Bus activation pointing at
 the AppImage) and, on desktops other than KDE/GNOME, autostarts the tray icon. Useful
 flags: `--dry-run`, `--desktop kde|gnome|other`, `--claude-statusline` (wraps your
-existing Claude Code statusline; refuses Nix-managed settings files). Everything it
-creates is recorded, and `./TokenStation-x86_64.AppImage uninstall` removes exactly
-that. Re-run `setup` after moving the file. GNOME on Wayland needs a re-login before the
-extension shows up.
+existing Claude Code statusline; refuses Nix-managed settings files) and `--force`
+(replace existing files that `setup` did not create; Nix-managed files are never
+replaced). Everything it creates is recorded, and
+`./TokenStation-x86_64.AppImage uninstall` removes exactly that. Re-run `setup` after
+moving the file. On Plasma the applet appears in the system tray on its own; GNOME on
+Wayland needs a re-login before the extension shows up.
 
 ## Requirements
 

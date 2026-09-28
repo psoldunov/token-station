@@ -117,6 +117,8 @@
                 export HOME=$TMPDIR
                 export XDG_DATA_DIRS=$share
                 export QT_QPA_PLATFORM=offscreen
+                # The Plasma/Applet package structure plugin ships with libplasma.
+                export QT_PLUGIN_PATH=${pkgs.kdePackages.libplasma}/${pkgs.qt6.qtbase.qtPluginPrefix}
                 kpackagetool6 --type Plasma/Applet --show dev.soldunov.tokenstation | tee info.txt
                 grep -q "Plugin     : dev.soldunov.tokenstation" info.txt
                 # An empty path is KPackage having refused the package contents.

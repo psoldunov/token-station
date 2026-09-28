@@ -25,7 +25,7 @@ so calling any method starts the daemon if it is not running.
 | `Refresh() → ()` | Refresh every provider now. Coalesced: concurrent calls share one refresh. Providers still apply their hard rate-limit backoff (forced endpoint calls are at least 30 s apart). Returns once the refresh finished. |
 | `GetHistory(s provider, s window_id, t since) → s` | JSON array `[[ts, percent], …]` of recorded samples for one window since `since` (Unix seconds), oldest first, down-sampled to at most 120 points. Unknown provider/window returns `[]`. |
 | `GetSettings() → s` | Current config as JSON (snake_case keys, same structure as `config.toml`, see `crates/ts-core/src/config.rs`). |
-| `SetSettings(s json) → ()` | Replace the config. Missing keys take defaults. Validated (bounds, unknown keys rejected) and written to `config.toml`; invalid input fails with `org.freedesktop.DBus.Error.InvalidArgs` and a message listing every problem. Applies immediately. |
+| `SetSettings(s json) → ()` | Replace the config. Missing keys take defaults. Validated (bounds, unknown keys rejected) and written to `config.toml`; invalid input fails with `org.freedesktop.DBus.Error.InvalidArgs` and a message listing every bound violation (a JSON syntax error or an unknown key is reported on its own, before bounds are checked). Fails with `InvalidArgs` when `config.toml` is a symlink or read-only (e.g. managed by Nix/home-manager). Applies immediately. |
 | `IngestClaudeStatusline(s json) → ()` | Used by `token-station statusline`. Raw statusline JSON from Claude Code (max 64 KiB). Invalid input fails with `InvalidArgs`. |
 
 ## Snapshot JSON
@@ -89,3 +89,9 @@ busctl --user get-property dev.soldunov.TokenStation /dev/soldunov/TokenStation 
 busctl --user call dev.soldunov.TokenStation /dev/soldunov/TokenStation \
   dev.soldunov.TokenStation1 Refresh
 ```
+
+## Internal interfaces
+
+`token-station tray` owns `dev.soldunov.TokenStation.Tray` (single instance) and exports
+`dev.soldunov.TokenStation.Tray1` with a `Quit()` method that `uninstall` uses to stop it.
+It is an implementation detail, not part of the public API above.
