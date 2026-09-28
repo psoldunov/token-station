@@ -46,6 +46,10 @@ pkgs.testers.runNixOSTest {
       ];
 
       environment.systemPackages = [ tokenStation ];
+      # The packaged systemd user unit and D-Bus activation file, exactly as an
+      # install gets them, so the test covers the activation path too.
+      systemd.packages = [ tokenStation ];
+      services.dbus.packages = [ tokenStation ];
 
       # Turn the extension on for the session, and keep the welcome dialog and
       # animations out of the screenshots.
@@ -63,22 +67,20 @@ pkgs.testers.runNixOSTest {
         pkgs.gsettings-desktop-schemas
       ];
 
-      # The packaged unit, pointed at the fixture instead of the real CLIs.
+      # A drop-in on the packaged unit: same Type=dbus activation, only pointed
+      # at the fixture instead of the real CLIs. Nothing pulls it in, so the
+      # daemon has to be started by D-Bus activation.
       systemd.user.services.token-station = {
-        description = "Token Station usage daemon (fixture)";
-        serviceConfig = {
-          Type = "dbus";
-          BusName = "dev.soldunov.TokenStation";
-          ExecStart = lib.escapeShellArgs [
+        overrideStrategy = "asDropin";
+        serviceConfig.ExecStart = [
+          ""
+          (lib.escapeShellArgs [
             "${tokenStation}/bin/token-station"
             "daemon"
             "--fixture"
             "${fixtureFile}"
-          ];
-          Restart = "on-failure";
-          RestartSec = 2;
-        };
-        wantedBy = [ "default.target" ];
+          ])
+        ];
       };
     };
 
@@ -101,6 +103,17 @@ pkgs.testers.runNixOSTest {
             "-m org.gnome.Shell.Eval " + shlex.quote(js)
         )
         return machine.succeed(user(call))
+
+
+    def assert_extension_quiet():
+        """No JS error, no GJS criticals and no message our own code logged."""
+        machine.fail(
+            "journalctl -b --no-pager | "
+            "grep -E 'JS ERROR|Gjs-CRITICAL|Gjs-WARNING' | "
+            "grep -qi 'token.station'"
+        )
+        # Every console.error() in the extension carries this prefix.
+        machine.fail("journalctl -b --no-pager | grep -q 'Token Station: '")
 
 
     def set_color_scheme(scheme):
@@ -139,8 +152,9 @@ pkgs.testers.runNixOSTest {
         # Leave the overview so the panel is on screen.
         machine.send_key("esc")
 
-    with subtest("The daemon serves the fixture"):
-        machine.wait_for_unit("token-station.service", "alice")
+    with subtest("D-Bus activation starts the packaged unit"):
+        # Nothing pulls the unit in, so it is the D-Bus activation file that
+        # starts it: either from the extension's own call, or from this one.
         machine.wait_until_succeeds(
             user(
                 "busctl --user get-property dev.soldunov.TokenStation "
@@ -148,6 +162,12 @@ pkgs.testers.runNixOSTest {
             )
             + " | grep -q schemaVersion"
         )
+        machine.wait_for_unit("token-station.service", "alice")
+        # It really is the packaged unit, carrying the drop-in with the fixture.
+        unit = machine.succeed(user("systemctl --user cat token-station.service"))
+        print(unit)
+        assert "RestartPreventExitStatus=75" in unit, unit
+        assert "--fixture" in unit, unit
 
     with subtest("The extension is active and quiet"):
         machine.wait_until_succeeds(
@@ -156,10 +176,7 @@ pkgs.testers.runNixOSTest {
         info = machine.succeed(user(f"gnome-extensions info {UUID}"))
         print(info)
         assert "Error" not in info, info
-        # No JS errors attributed to the extension anywhere in the boot journal.
-        machine.fail(
-            "journalctl -b --no-pager | grep -E 'JS ERROR' | grep -q token-station"
-        )
+        assert_extension_quiet()
         # And the indicator really is in the panel.
         machine.succeed(
             user(
@@ -216,9 +233,7 @@ pkgs.testers.runNixOSTest {
         machine.sleep(3)
         machine.screenshot("prefs")
 
-    with subtest("Still no JS errors from the extension"):
-        machine.fail(
-            "journalctl -b --no-pager | grep -E 'JS ERROR' | grep -q token-station"
-        )
+    with subtest("Still nothing logged by the extension"):
+        assert_extension_quiet()
   '';
 }

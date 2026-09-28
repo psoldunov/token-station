@@ -9,6 +9,23 @@ const MINUTE = 60;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
+/**
+ * A number the way the session's locale writes it: its own digits, its own
+ * decimal mark and its own grouping.
+ *
+ * @param {number} value Any finite number.
+ * @param {number} digits Fraction digits, fixed.
+ * @returns {string} Formatted number.
+ */
+export function formatNumber(value, digits = 0) {
+    if (!Number.isFinite(value))
+        return '—';
+    return value.toLocaleString(undefined, {
+        minimumFractionDigits: digits,
+        maximumFractionDigits: digits,
+    });
+}
+
 /** Unix seconds, as the daemon counts them. */
 export function now() {
     return Math.floor(Date.now() / 1000);
@@ -29,7 +46,7 @@ export function formatCount(value) {
         const scaled = n / divisor;
         // One decimal while it still carries information; whole units above.
         const digits = scaled < 100 ? 1 : 0;
-        return `${sign}${scaled.toFixed(digits)}${NNBSP}${suffix}`;
+        return `${sign}${formatNumber(scaled, digits)}${NNBSP}${suffix}`;
     };
     if (n >= 1e12)
         return scale(1e12, _('T'));
@@ -39,7 +56,7 @@ export function formatCount(value) {
         return scale(1e6, _('M'));
     if (n >= 1e3)
         return scale(1e3, _('k'));
-    return `${sign}${Math.round(n)}`;
+    return `${sign}${formatNumber(Math.round(n))}`;
 }
 
 /**
@@ -63,7 +80,7 @@ export function formatCurrency(value, currency) {
             // Fall through to the plain number.
         }
     }
-    return value.toFixed(2);
+    return formatNumber(value, 2);
 }
 
 /**
@@ -75,7 +92,7 @@ export function formatCurrency(value, currency) {
 export function formatPercent(percent) {
     if (!Number.isFinite(percent))
         return '—';
-    return `${Math.round(percent)}${NNBSP}%`;
+    return `${formatNumber(Math.round(percent))}${NNBSP}%`;
 }
 
 /**

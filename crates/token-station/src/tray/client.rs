@@ -13,6 +13,7 @@ use crate::dbus::client::{connect, daemon_is_running};
 use crate::dbus::{BUS_NAME, INTERFACE_NAME, OBJECT_PATH};
 use crate::tray::palette::ColorScheme;
 use crate::tray::portal::{self, SettingsProxy};
+use crate::tray::{TRAY_BUS_NAME, TRAY_INTERFACE_NAME, TRAY_OBJECT_PATH};
 
 /// One thing the tray has to react to.
 #[derive(Debug, Clone, PartialEq)]
@@ -73,6 +74,46 @@ pub async fn initial_snapshot(connection: &zbus::Connection) -> Option<Box<Snaps
 /// Ask the daemon to refresh now.
 pub async fn request_refresh(connection: &zbus::Connection) -> zbus::Result<()> {
     connect(connection).await?.refresh().await
+}
+
+/// Ask a running tray to quit. `Ok(false)` when no tray owns the name.
+pub async fn request_quit(connection: &zbus::Connection) -> zbus::Result<bool> {
+    let bus = zbus::fdo::DBusProxy::new(connection).await?;
+    if !bus.name_has_owner(TRAY_BUS_NAME.try_into()?).await? {
+        return Ok(false);
+    }
+    let proxy = zbus::Proxy::new(
+        connection,
+        TRAY_BUS_NAME,
+        TRAY_OBJECT_PATH,
+        TRAY_INTERFACE_NAME,
+    )
+    .await?;
+    proxy.call_method("Quit", &()).await?;
+    Ok(true)
+}
+
+/// [`request_quit`] from a synchronous caller: `uninstall` has no runtime.
+///
+/// `bus_address` names the bus to use; `None` takes the one in the environment.
+pub fn request_quit_blocking(bus_address: Option<&str>) -> Result<bool, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    runtime.block_on(async {
+        let connection = match bus_address {
+            Some(address) => zbus::connection::Builder::address(address)
+                .map_err(|e| e.to_string())?
+                .build()
+                .await
+                .map_err(|e| e.to_string())?,
+            None => zbus::Connection::session()
+                .await
+                .map_err(|e| e.to_string())?,
+        };
+        request_quit(&connection).await.map_err(|e| e.to_string())
+    })
 }
 
 /// Follow `Snapshot` and the ownership of the daemon's bus name until the

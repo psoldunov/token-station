@@ -3,7 +3,7 @@
 //! Everything here is a pure function of the snapshot, so the wording is tested
 //! against the recorded fixtures without a bus or a tray host.
 
-use ts_core::{ProviderSnapshot, ProviderState, Snapshot};
+use ts_core::{ProviderSnapshot, ProviderState, Snapshot, UsageWindow};
 
 use crate::status::{reset_suffix, state_text, totals_text};
 
@@ -44,8 +44,7 @@ fn heading(provider: &ProviderSnapshot) -> String {
 }
 
 /// `Session · 34% · resets in 4h 40m`.
-fn window_line(provider: &ProviderSnapshot, index: usize, now: i64) -> String {
-    let window = &provider.windows[index];
+fn window_line(window: &UsageWindow, now: i64) -> String {
     format!(
         "{INDENT}{} · {}%{}",
         window.label,
@@ -66,8 +65,8 @@ pub fn menu_text(snapshot: Option<&Snapshot>, now: i64) -> MenuText {
     for provider in &snapshot.providers {
         text.usage.push(heading(provider));
         if has_data(provider) {
-            for index in 0..provider.windows.len() {
-                text.usage.push(window_line(provider, index, now));
+            for window in &provider.windows {
+                text.usage.push(window_line(window, now));
             }
         }
         if let Some(tokens) = &provider.tokens {

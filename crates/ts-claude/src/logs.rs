@@ -1,7 +1,8 @@
 //! Incremental scanner for `<config_dir>/projects/**/*.jsonl` transcript logs.
 
-use std::collections::HashMap;
-use std::io::{Read, Seek, SeekFrom};
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
@@ -11,39 +12,58 @@ use ts_core::tokens::{TokenCounts, TokenEvent};
 /// Only files younger than this are picked up the first time they are noticed.
 const MAX_LOOKBACK_SECS: i64 = 8 * 86_400;
 
+/// How many leading bytes of a file are hashed into its fingerprint.
+const FINGERPRINT_BYTES: usize = 256;
+
+/// Per-file read state, keyed by `(dev, ino)`.
+#[derive(Debug, Clone, Default)]
+struct FileState {
+    offset: u64,
+    /// Hash of the file's first bytes plus its mtime at the time `offset` was
+    /// recorded. A mismatch means the inode was reused for a different file
+    /// (e.g. after transcript cleanup), so the offset must not be trusted.
+    fingerprint: Option<u64>,
+}
+
 /// Per-file byte offsets, carried across scans.
 #[derive(Debug, Clone, Default)]
 pub struct LogScanState {
-    offsets: HashMap<(u64, u64), u64>,
+    files: HashMap<(u64, u64), FileState>,
 }
 
 /// Scan every `*.jsonl` file under `roots` for new [`TokenEvent`]s, advancing
 /// `state`'s stored offsets. Never panics: unreadable files or malformed lines
-/// are skipped.
+/// are skipped. Keys not seen in this scan (files removed since the last
+/// scan) are pruned so the state never grows unbounded.
 pub fn scan(roots: &[PathBuf], state: &mut LogScanState, now: i64) -> Vec<TokenEvent> {
     let cutoff = now - MAX_LOOKBACK_SECS;
     let mut events = Vec::new();
+    let mut seen: HashSet<(u64, u64)> = HashSet::new();
     for root in roots {
         for path in collect_jsonl_files(root) {
             let Ok(meta) = std::fs::metadata(&path) else {
                 continue;
             };
             let key = (meta.dev(), meta.ino());
-            let is_new = !state.offsets.contains_key(&key);
+            seen.insert(key);
+            let prior = state.files.get(&key).cloned();
+            let is_new = prior.is_none();
             if is_new && file_mtime(&meta) < cutoff {
                 continue;
             }
-            let start_offset = match state.offsets.get(&key) {
-                Some(&off) if off <= meta.len() => off,
-                _ => 0,
-            };
-            let Some((mut file_events, new_offset)) = scan_file(&path, start_offset) else {
+            if let Some(p) = &prior {
+                if meta.len() == p.offset {
+                    continue; // unchanged: skip opening the file entirely
+                }
+            }
+            let Some((mut file_events, new_state)) = scan_file(&path, prior.as_ref()) else {
                 continue;
             };
-            state.offsets.insert(key, new_offset);
+            state.files.insert(key, new_state);
             events.append(&mut file_events);
         }
     }
+    state.files.retain(|key, _| seen.contains(key));
     events
 }
 
@@ -77,29 +97,69 @@ fn collect_jsonl_files(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Read new complete lines starting at `offset`; returns events and the offset
-/// just past the last complete line (a trailing partial line is left for next
-/// time).
-fn scan_file(path: &Path, offset: u64) -> Option<(Vec<TokenEvent>, u64)> {
-    let mut file = std::fs::File::open(path).ok()?;
-    file.seek(SeekFrom::Start(offset)).ok()?;
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf).ok()?;
+/// Hash of the file's leading bytes; used to detect inode reuse. Deliberately
+/// excludes mtime: a normal append changes mtime on every scan, which would
+/// otherwise make every legitimate incremental scan look like a reused inode.
+/// The header bytes of an append-only log stay stable, so a real content
+/// change there is a strong signal that this is a different file.
+fn fingerprint_of(file: &mut std::fs::File) -> Option<u64> {
+    let mut header = [0u8; FINGERPRINT_BYTES];
+    let n = file.read(&mut header).ok()?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    header.get(..n).unwrap_or(&[]).hash(&mut hasher);
+    Some(hasher.finish())
+}
 
+/// Read new complete lines starting at `prior`'s offset (or from the start if
+/// the fingerprint no longer matches, meaning the inode was reused). Streams
+/// the file line by line rather than reading it whole; a trailing partial
+/// line is left for next time.
+fn scan_file(path: &Path, prior: Option<&FileState>) -> Option<(Vec<TokenEvent>, FileState)> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let fingerprint = fingerprint_of(&mut file)?;
+    let len = file.metadata().ok()?.len();
+
+    let reset = match prior {
+        Some(p) => p.fingerprint != Some(fingerprint) || p.offset > len,
+        None => false,
+    };
+    let start_offset = if reset {
+        0
+    } else {
+        prior.map(|p| p.offset).unwrap_or(0)
+    };
+
+    file.seek(SeekFrom::Start(start_offset)).ok()?;
+    let mut reader = BufReader::new(file);
     let mut events = Vec::new();
-    let mut consumed: u64 = 0;
-    for line in buf.split_inclusive(|&b| b == b'\n') {
+    let mut consumed = start_offset;
+    loop {
+        let mut line = Vec::new();
+        let n = match reader.read_until(b'\n', &mut line) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => break,
+        };
         if line.last() != Some(&b'\n') {
-            break;
+            break; // incomplete trailing line: wait for the next scan
         }
-        consumed += line.len() as u64;
-        if let Ok(text) = std::str::from_utf8(line) {
+        consumed += n as u64;
+        let Some(without_newline) = line.strip_suffix(b"\n") else {
+            break;
+        };
+        if let Ok(text) = std::str::from_utf8(without_newline) {
             if let Some(event) = parse_line(text) {
                 events.push(event);
             }
         }
     }
-    Some((events, offset + consumed))
+    Some((
+        events,
+        FileState {
+            offset: consumed,
+            fingerprint: Some(fingerprint),
+        },
+    ))
 }
 
 fn parse_line(text: &str) -> Option<TokenEvent> {
@@ -118,9 +178,11 @@ fn parse_line(text: &str) -> Option<TokenEvent> {
         .get("timestamp")
         .and_then(ts_core::time::parse_timestamp)?;
 
+    // `uuid` is unique per streamed line for the same message, not per
+    // request, so it must never be used as (part of) the dedup key: that
+    // would defeat dedup entirely for streamed content-block lines.
     let request_id = value.get("requestId").and_then(Value::as_str);
-    let uuid = value.get("uuid").and_then(value_as_id_str);
-    let dedup_key = match request_id.or(uuid.as_deref()) {
+    let dedup_key = match request_id {
         Some(tail) => format!("{message_id}:{tail}"),
         None => message_id.to_string(),
     };
@@ -144,14 +206,6 @@ fn parse_line(text: &str) -> Option<TokenEvent> {
         },
         dedup_key,
     })
-}
-
-fn value_as_id_str(v: &Value) -> Option<String> {
-    match v {
-        Value::String(s) => Some(s.clone()),
-        Value::Number(n) => Some(n.to_string()),
-        _ => None,
-    }
 }
 
 #[cfg(test)]
@@ -280,26 +334,88 @@ mod tests {
         assert_eq!(events.len(), 1);
     }
 
+    /// Write `lines` to a single fresh `a.jsonl` and scan it once.
+    fn scan_lines(lines: &[String]) -> Vec<TokenEvent> {
+        let dir = tempfile::tempdir().unwrap();
+        write_jsonl(dir.path(), "a.jsonl", lines);
+        let mut state = LogScanState::default();
+        scan(&[dir.path().to_path_buf()], &mut state, NOW)
+    }
+
     #[test]
     fn skips_synthetic_model_and_non_assistant_lines() {
-        let dir = tempfile::tempdir().unwrap();
         let synthetic = assistant_line("msg1", Some("req1"), "<synthetic>", "2026-09-28T11:00:00Z");
         let user_line = r#"{"type":"user","timestamp":"2026-09-28T11:00:00Z"}"#.to_string();
-        write_jsonl(dir.path(), "a.jsonl", &[synthetic, user_line]);
-
-        let mut state = LogScanState::default();
-        let events = scan(&[dir.path().to_path_buf()], &mut state, NOW);
+        let events = scan_lines(&[synthetic, user_line]);
         assert!(events.is_empty());
     }
 
     #[test]
-    fn falls_back_to_uuid_when_request_id_missing() {
-        let dir = tempfile::tempdir().unwrap();
+    fn falls_back_to_message_id_alone_when_request_id_missing() {
+        // `uuid` must never be used: it is unique per streamed line for the
+        // same message, so folding it into the key would defeat dedup.
         let l1 = assistant_line("msg1", None, "m", "2026-09-28T11:00:00Z");
-        write_jsonl(dir.path(), "a.jsonl", &[l1]);
+        let events = scan_lines(&[l1]);
+        assert_eq!(events[0].dedup_key, "msg1");
+    }
 
+    #[test]
+    fn inode_reuse_resets_offset_instead_of_skipping_new_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.jsonl");
+        let l1 = assistant_line(
+            "msg1",
+            Some("req1"),
+            "claude-opus-5-5-with-a-long-enough-name",
+            "2026-09-28T11:00:00Z",
+        );
+        write_jsonl(dir.path(), "a.jsonl", &[l1]);
         let mut state = LogScanState::default();
         let events = scan(&[dir.path().to_path_buf()], &mut state, NOW);
-        assert_eq!(events[0].dedup_key, "msg1:u-msg1");
+        assert_eq!(events.len(), 1);
+
+        // Simulate inode reuse: delete and recreate a file with unrelated,
+        // shorter content at the same path. On most filesystems a fresh
+        // inode is likely, but the fingerprint check must catch it even if
+        // the OS happened to reuse the same inode.
+        std::fs::remove_file(&path).unwrap();
+        let l2 = assistant_line("msg2", Some("req2"), "m", "2026-09-28T11:05:00Z");
+        write_jsonl(dir.path(), "a.jsonl", &[l2]);
+        let events2 = scan(&[dir.path().to_path_buf()], &mut state, NOW);
+        assert_eq!(events2.len(), 1);
+        assert_eq!(events2[0].dedup_key, "msg2:req2");
+    }
+
+    #[test]
+    fn prunes_state_for_files_removed_since_last_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.jsonl");
+        let l1 = assistant_line("msg1", Some("req1"), "m", "2026-09-28T11:00:00Z");
+        write_jsonl(dir.path(), "a.jsonl", &[l1]);
+        let mut state = LogScanState::default();
+        scan(&[dir.path().to_path_buf()], &mut state, NOW);
+        assert_eq!(state.files.len(), 1);
+
+        std::fs::remove_file(&path).unwrap();
+        scan(&[dir.path().to_path_buf()], &mut state, NOW);
+        assert!(
+            state.files.is_empty(),
+            "removed file's state must be pruned"
+        );
+    }
+
+    #[test]
+    fn unchanged_file_is_not_reopened() {
+        let dir = tempfile::tempdir().unwrap();
+        let l1 = assistant_line("msg1", Some("req1"), "m", "2026-09-28T11:00:00Z");
+        write_jsonl(dir.path(), "a.jsonl", &[l1]);
+        let mut state = LogScanState::default();
+        let events = scan(&[dir.path().to_path_buf()], &mut state, NOW);
+        assert_eq!(events.len(), 1);
+
+        // Second scan with no file change must return no new events (and,
+        // per the fast path, never open the file at all).
+        let events2 = scan(&[dir.path().to_path_buf()], &mut state, NOW);
+        assert!(events2.is_empty());
     }
 }

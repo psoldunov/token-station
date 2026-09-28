@@ -218,6 +218,27 @@ fn as_flexible_f64(v: &Value) -> Option<f64> {
     }
 }
 
+/// Shared tail of `credits_from_spend`/`credits_from_extra_usage`: both
+/// sources map to the same [`Credits`] shape once their differently-named
+/// fields are extracted.
+fn credits_from_fields(
+    enabled: bool,
+    used: Option<f64>,
+    limit: Option<f64>,
+    percent: Option<f64>,
+    currency: Option<String>,
+) -> Credits {
+    Credits {
+        label: "Extra usage".to_string(),
+        enabled,
+        used,
+        limit,
+        currency,
+        percent,
+        detail: (!enabled).then(|| "Turned off".to_string()),
+    }
+}
+
 fn credits_from_spend(spend: Option<&Value>) -> Option<Credits> {
     let spend = spend.filter(|v| !v.is_null())?;
     let enabled = spend
@@ -236,16 +257,7 @@ fn credits_from_spend(spend: Option<&Value>) -> Option<Credits> {
         .map(str::to_string);
     let limit = spend.get("limit").and_then(as_flexible_f64);
     let percent = spend.get("percent").and_then(as_flexible_f64);
-    let detail = (!enabled).then(|| "Turned off".to_string());
-    Some(Credits {
-        label: "Extra usage".to_string(),
-        enabled,
-        used,
-        limit,
-        currency,
-        percent,
-        detail,
-    })
+    Some(credits_from_fields(enabled, used, limit, percent, currency))
 }
 
 fn credits_from_extra_usage(extra: Option<&Value>) -> Option<Credits> {
@@ -261,16 +273,7 @@ fn credits_from_extra_usage(extra: Option<&Value>) -> Option<Credits> {
         .get("currency")
         .and_then(Value::as_str)
         .map(str::to_string);
-    let detail = (!enabled).then(|| "Turned off".to_string());
-    Some(Credits {
-        label: "Extra usage".to_string(),
-        enabled,
-        used,
-        limit,
-        currency,
-        percent,
-        detail,
-    })
+    Some(credits_from_fields(enabled, used, limit, percent, currency))
 }
 
 fn parse_breakdown(breakdown: Option<&Value>) -> Vec<BreakdownRow> {
@@ -428,29 +431,30 @@ mod tests {
         assert!(!credits.enabled);
     }
 
+    /// Parse a `limits` array with exactly one entry and return its window.
+    fn single_limit_window(limit: serde_json::Value) -> UsageWindow {
+        let text = serde_json::json!({ "limits": [limit] }).to_string();
+        let parsed = parse_usage(&text, 0).unwrap();
+        parsed.windows.into_iter().next().unwrap()
+    }
+
     #[test]
     fn weekly_scoped_without_display_name_is_graceful() {
-        let text = serde_json::json!({
-            "limits": [
-                {"kind": "weekly_scoped", "percent": 1.0, "resets_at": null, "scope": null}
-            ]
-        })
-        .to_string();
-        let parsed = parse_usage(&text, 0).unwrap();
-        assert_eq!(parsed.windows[0].id, "weekly_scoped");
-        assert_eq!(parsed.windows[0].label, "Weekly · Unknown");
+        let window = single_limit_window(serde_json::json!(
+            {"kind": "weekly_scoped", "percent": 1.0, "resets_at": null, "scope": null}
+        ));
+        assert_eq!(window.id, "weekly_scoped");
+        assert_eq!(window.label, "Weekly · Unknown");
     }
 
     #[test]
     fn unknown_limit_kind_is_humanized_other() {
-        let text = serde_json::json!({
-            "limits": [{"kind": "cowork_extra", "percent": 3.0, "resets_at": null}]
-        })
-        .to_string();
-        let parsed = parse_usage(&text, 0).unwrap();
-        assert_eq!(parsed.windows[0].id, "cowork_extra");
-        assert_eq!(parsed.windows[0].label, "Cowork Extra");
-        assert_eq!(parsed.windows[0].kind, WindowKind::Other);
+        let window = single_limit_window(
+            serde_json::json!({"kind": "cowork_extra", "percent": 3.0, "resets_at": null}),
+        );
+        assert_eq!(window.id, "cowork_extra");
+        assert_eq!(window.label, "Cowork Extra");
+        assert_eq!(window.kind, WindowKind::Other);
     }
 
     #[test]

@@ -36,6 +36,39 @@ ColumnLayout {
     readonly property var breakdown: provider && provider.breakdown ? provider.breakdown : []
     readonly property var credits: provider ? provider.credits : null
 
+    /*!
+       "Extra usage · $4.20 of $50.00", or what the provider says instead. Money
+       is only shown while extra usage is switched on, so a disabled balance never
+       reads as "$0.00 spent". Same rules as the GNOME menu's credits line.
+    */
+    readonly property string creditsText: {
+        if (!root.credits) {
+            return "";
+        }
+        const label = root.credits.label
+            ? root.credits.label
+            : i18nc("@label Fallback name for extra paid usage", "Credits");
+        const parts = [];
+        if (root.credits.enabled && typeof root.credits.used === "number") {
+            const spent = Formatters.currency(root.credits.used, root.credits.currency);
+            parts.push(typeof root.credits.limit === "number"
+                ? i18nc("@info Credit spend against a cap, e.g. '$4.20 of $50.00'", "%1 of %2",
+                        spent, Formatters.currency(root.credits.limit, root.credits.currency))
+                : spent);
+        }
+        if (root.credits.detail) {
+            parts.push(root.credits.detail);
+        }
+        if (parts.length === 0) {
+            if (root.credits.enabled) {
+                return "";
+            }
+            parts.push(i18nc("@info Extra paid usage is switched off for this account", "Turned off"));
+        }
+        return i18nc("@info Extra usage and its state, e.g. 'Extra usage · $4.20 of $50.00'",
+                     "%1 · %2", label, parts.join(" · "));
+    }
+
     function messageType(state) {
         switch (state) {
         case "error":
@@ -158,28 +191,11 @@ ColumnLayout {
         Layout.rightMargin: Kirigami.Units.largeSpacing
         Layout.topMargin: Kirigami.Units.smallSpacing
 
-        visible: !!root.credits
+        visible: root.creditsText.length > 0
         wrapMode: Text.WordWrap
         textFormat: Text.PlainText
         font: Kirigami.Theme.smallFont
-        text: {
-            if (!root.credits) {
-                return "";
-            }
-            const label = root.credits.label ? root.credits.label : i18nc("@label Fallback name for extra paid usage", "Credits");
-            if (typeof root.credits.used === "number") {
-                const spent = Formatters.currency(root.credits.used, root.credits.currency);
-                if (typeof root.credits.limit === "number") {
-                    return i18nc("@info Credit spend against a cap, e.g. 'Extra usage · $4.20 of $50.00'",
-                                 "%1 · %2 of %3", label, spent,
-                                 Formatters.currency(root.credits.limit, root.credits.currency));
-                }
-                return i18nc("@info Credit spend with no cap", "%1 · %2", label, spent);
-            }
-            return root.credits.detail
-                ? i18nc("@info Credit state described by the provider", "%1 · %2", label, root.credits.detail)
-                : label;
-        }
+        text: root.creditsText
     }
 
     TokenSummary {

@@ -2,47 +2,99 @@
 //!
 //! The text is built by pure functions so it can be asserted without a notification
 //! daemon; [`Notifier`] is the seam the tests replace.
+//!
+//! The call goes straight to `org.freedesktop.Notifications` over the session bus.
+//! Convenience wrappers around that interface tend to build a runtime of their own,
+//! which panics ("cannot start a runtime from within a runtime") the moment an
+//! alert fires from a tokio worker thread, so the daemon owns the proxy instead.
 
+use std::collections::HashMap;
+
+use async_trait::async_trait;
 use ts_core::Level;
 use ts_core::alerts::{Alert, AlertKind};
+use zbus::zvariant::Value;
 
 /// Desktop entry / icon name shared with the `.desktop` file.
 pub const APP_ID: &str = "dev.soldunov.TokenStation";
 pub const APP_NAME: &str = "Token Station";
 
+/// How long a notification stays up; `-1` leaves it to the server's default.
+const EXPIRE_DEFAULT: i32 = -1;
+
+/// Where the notification server listens.
+pub const NOTIFICATIONS_SERVICE: &str = "org.freedesktop.Notifications";
+pub const NOTIFICATIONS_PATH: &str = "/org/freedesktop/Notifications";
+
 /// Something that can show a desktop notification.
+#[async_trait]
 pub trait Notifier: Send + Sync {
-    fn notify(&self, summary: &str, body: &str, level: Level);
+    async fn notify(&self, summary: &str, body: &str, level: Level);
 }
 
-/// Sends through the session bus with notify-rust's pure-Rust zbus backend.
-pub struct DesktopNotifier;
+/// Sends through the session bus, on the connection the daemon already owns.
+pub struct DesktopNotifier {
+    connection: zbus::Connection,
+}
 
+impl DesktopNotifier {
+    pub fn new(connection: zbus::Connection) -> DesktopNotifier {
+        DesktopNotifier { connection }
+    }
+
+    async fn send(&self, summary: &str, body: &str, level: Level) -> zbus::Result<u32> {
+        let proxy = zbus::Proxy::new(
+            &self.connection,
+            NOTIFICATIONS_SERVICE,
+            NOTIFICATIONS_PATH,
+            NOTIFICATIONS_SERVICE,
+        )
+        .await?;
+        let hints: HashMap<&str, Value<'_>> = HashMap::from([
+            ("urgency", Value::U8(urgency(level))),
+            ("desktop-entry", Value::from(APP_ID)),
+        ]);
+        proxy
+            .call(
+                "Notify",
+                &(
+                    APP_NAME,
+                    0u32,
+                    APP_ID,
+                    summary,
+                    body,
+                    Vec::<&str>::new(),
+                    hints,
+                    EXPIRE_DEFAULT,
+                ),
+            )
+            .await
+    }
+}
+
+#[async_trait]
 impl Notifier for DesktopNotifier {
-    fn notify(&self, summary: &str, body: &str, level: Level) {
-        let urgency = match level {
-            Level::Critical => notify_rust::Urgency::Critical,
-            _ => notify_rust::Urgency::Normal,
-        };
-        let result = notify_rust::Notification::new()
-            .appname(APP_NAME)
-            .summary(summary)
-            .body(body)
-            .icon(APP_ID)
-            .hint(notify_rust::Hint::DesktopEntry(APP_ID.into()))
-            .urgency(urgency)
-            .show();
-        if let Err(error) = result {
+    async fn notify(&self, summary: &str, body: &str, level: Level) {
+        if let Err(error) = self.send(summary, body, level).await {
             tracing::warn!(%error, "cannot show desktop notification");
         }
+    }
+}
+
+/// The `urgency` hint the notification spec defines.
+fn urgency(level: Level) -> u8 {
+    match level {
+        Level::Critical => 2,
+        Level::Warning | Level::Normal => 1,
     }
 }
 
 /// Drops every notification; used when alerts are off and in tests.
 pub struct SilentNotifier;
 
+#[async_trait]
 impl Notifier for SilentNotifier {
-    fn notify(&self, _summary: &str, _body: &str, _level: Level) {}
+    async fn notify(&self, _summary: &str, _body: &str, _level: Level) {}
 }
 
 /// Summary, body and urgency for one alert, as seen by the user.
@@ -103,11 +155,11 @@ fn format_duration(seconds: i64, gap: &str, d: &str, h: &str, m: &str) -> String
 }
 
 /// Show every alert.
-pub fn deliver(notifier: &dyn Notifier, alerts: &[Alert], now: i64) {
+pub async fn deliver(notifier: &dyn Notifier, alerts: &[Alert], now: i64) {
     for alert in alerts {
         let (summary, body, level) = alert_text(alert, now);
         tracing::info!(%summary, %body, "alert");
-        notifier.notify(&summary, &body, level);
+        notifier.notify(&summary, &body, level).await;
     }
 }
 
@@ -123,8 +175,9 @@ pub(crate) mod testing {
         pub sent: Mutex<Vec<(String, String, Level)>>,
     }
 
+    #[async_trait]
     impl Notifier for RecordingNotifier {
-        fn notify(&self, summary: &str, body: &str, level: Level) {
+        async fn notify(&self, summary: &str, body: &str, level: Level) {
             let mut sent = self.sent.lock().unwrap_or_else(|e| e.into_inner());
             sent.push((summary.into(), body.into(), level));
         }
@@ -176,6 +229,13 @@ mod tests {
     }
 
     #[test]
+    fn the_urgency_hint_follows_the_level() {
+        assert_eq!(urgency(Level::Critical), 2);
+        assert_eq!(urgency(Level::Warning), 1);
+        assert_eq!(urgency(Level::Normal), 1);
+    }
+
+    #[test]
     fn missing_or_past_reset_times_read_sensibly() {
         assert_eq!(
             alert_text(&alert(AlertKind::Warning, 80.0, None), 0).1,
@@ -199,8 +259,8 @@ mod tests {
         assert_eq!(compact_duration(273_600), "3d 4h");
     }
 
-    #[test]
-    fn deliver_sends_one_notification_per_alert() {
+    #[tokio::test]
+    async fn deliver_sends_one_notification_per_alert() {
         let notifier = RecordingNotifier::default();
         deliver(
             &notifier,
@@ -209,7 +269,8 @@ mod tests {
                 alert(AlertKind::Critical, 99.0, Some(3_600)),
             ],
             0,
-        );
+        )
+        .await;
         assert_eq!(
             notifier.summaries(),
             vec![
@@ -219,8 +280,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn silent_notifier_does_nothing() {
-        SilentNotifier.notify("a", "b", Level::Critical);
+    #[tokio::test]
+    async fn silent_notifier_does_nothing() {
+        SilentNotifier.notify("a", "b", Level::Critical).await;
     }
 }

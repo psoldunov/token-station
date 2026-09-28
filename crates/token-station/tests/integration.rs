@@ -52,6 +52,9 @@ impl Home {
             appdir: None,
             path: Some(self.bin.to_string_lossy().into_owned()),
             claude_config_dir: None,
+            // A bus that is not there: no test may reach the developer's own
+            // session bus and stop the tray running in it.
+            bus_address: Some("unix:path=/nonexistent/token-station-test".into()),
         }
     }
 
@@ -94,6 +97,7 @@ fn options(desktop: DesktopChoice, payload: Option<PathBuf>) -> SetupOptions {
         claude_statusline: false,
         payload_dir: payload,
         dry_run: false,
+        force: false,
     }
 }
 
@@ -421,4 +425,218 @@ fn a_dry_run_lists_every_step_and_changes_nothing() {
     assert!(!home.path("config").exists());
     assert!(!Manifest::path(&home.env()).exists());
     assert!(home.invocations().is_empty());
+}
+
+#[test]
+fn a_file_setup_did_not_install_is_left_alone_unless_forced() {
+    let home = Home::new(&["systemctl"]);
+    let autostart = home.path("config/autostart/dev.soldunov.TokenStation.Tray.desktop");
+    std::fs::create_dir_all(autostart.parent().unwrap()).unwrap();
+    std::fs::write(&autostart, "[Desktop Entry]\nName=Someone else's\n").unwrap();
+
+    let summary = integration::setup(
+        &options(DesktopChoice::Other, None),
+        &home.env(),
+        &home.session(Some("sway")),
+        NOW,
+    )
+    .unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(&autostart).unwrap(),
+        "[Desktop Entry]\nName=Someone else's\n",
+        "an entry we never installed must survive"
+    );
+    assert!(summary.contains("--force"), "{summary}");
+    assert!(
+        !manifest_of(&home).files.contains(&autostart),
+        "a file we skipped is not claimed as ours"
+    );
+
+    // With --force it is replaced, and then it is ours.
+    let mut forced = options(DesktopChoice::Other, None);
+    forced.force = true;
+    integration::setup(&forced, &home.env(), &home.session(Some("sway")), NOW).unwrap();
+    assert!(
+        std::fs::read_to_string(&autostart)
+            .unwrap()
+            .contains("tray"),
+        "--force rewrites it"
+    );
+    assert!(manifest_of(&home).files.contains(&autostart));
+}
+
+#[test]
+fn a_nix_store_symlink_is_never_replaced_even_with_force() {
+    let home = Home::new(&["systemctl"]);
+    let unit = home.path("config/systemd/user/token-station.service");
+    std::fs::create_dir_all(unit.parent().unwrap()).unwrap();
+    // What a home-manager generation leaves there; the link need not resolve.
+    std::os::unix::fs::symlink("/nix/store/abc123-token-station/unit", &unit).unwrap();
+
+    let mut forced = options(DesktopChoice::Other, None);
+    forced.force = true;
+    let summary =
+        integration::setup(&forced, &home.env(), &home.session(Some("sway")), NOW).unwrap();
+
+    assert_eq!(
+        std::fs::read_link(&unit).unwrap(),
+        Path::new("/nix/store/abc123-token-station/unit")
+    );
+    assert!(summary.contains("/nix/store"), "{summary}");
+    assert!(!manifest_of(&home).files.contains(&unit));
+}
+
+#[test]
+fn a_packaged_unit_keeps_its_place_and_is_reported() {
+    // The system directories are read as they are, so this only asserts the
+    // reporting shape when a packaged copy does exist.
+    let packaged = Path::new("/usr/lib/systemd/user/token-station.service").exists()
+        || Path::new("/etc/systemd/user/token-station.service").exists();
+    if !packaged {
+        eprintln!("skipping: no packaged unit on this machine");
+        return;
+    }
+    let home = Home::new(&["systemctl"]);
+    let summary = integration::setup(
+        &options(DesktopChoice::Other, None),
+        &home.env(),
+        &home.session(Some("sway")),
+        NOW,
+    )
+    .unwrap();
+    assert!(summary.contains("left it in charge"), "{summary}");
+    assert!(!home.path("config/systemd/user").exists());
+}
+
+#[test]
+fn a_setup_that_fails_halfway_still_records_what_it_installed() {
+    let home = Home::new(&["systemctl"]);
+    // A regular file where the icon directory has to go: the write cannot work,
+    // and it comes after the unit and the activation file in the plan.
+    let icons = home.path("data/icons");
+    std::fs::create_dir_all(icons.parent().unwrap()).unwrap();
+    std::fs::write(&icons, "not a directory").unwrap();
+
+    let error = integration::setup(
+        &options(DesktopChoice::Other, None),
+        &home.env(),
+        &home.session(Some("sway")),
+        NOW,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("uninstall"), "{error}");
+
+    let manifest = manifest_of(&home);
+    let service = home.path("data/dbus-1/services/dev.soldunov.TokenStation.service");
+    assert!(
+        manifest.files.contains(&service),
+        "the files that did land are recorded: {:?}",
+        manifest.files
+    );
+
+    // And `uninstall` can now undo them.
+    std::fs::remove_file(&icons).unwrap();
+    integration::uninstall(&home.env(), &home.session(Some("sway"))).unwrap();
+    assert!(!service.exists());
+}
+
+#[test]
+fn uninstall_ignores_a_manifest_entry_outside_the_xdg_roots() {
+    let home = Home::new(&["systemctl"]);
+    integration::setup(
+        &options(DesktopChoice::Other, None),
+        &home.env(),
+        &home.session(Some("sway")),
+        NOW,
+    )
+    .unwrap();
+
+    // Anything that can write the state directory can ask for a path to go.
+    let hostage = home.path("home/.bashrc");
+    std::fs::create_dir_all(hostage.parent().unwrap()).unwrap();
+    std::fs::write(&hostage, "export PATH=$PATH\n").unwrap();
+    let hostage_dir = home.path("home/Documents");
+    std::fs::create_dir_all(&hostage_dir).unwrap();
+
+    let manifest_path = Manifest::path(&home.env());
+    let mut manifest = manifest_of(&home);
+    manifest.files.push(hostage.clone());
+    manifest.dirs.push(hostage_dir.clone());
+    manifest.save(&manifest_path).unwrap();
+
+    let summary = integration::uninstall(&home.env(), &home.session(Some("sway"))).unwrap();
+    assert!(
+        hostage.exists(),
+        "a tampered entry must not delete $HOME files"
+    );
+    assert!(hostage_dir.exists());
+    assert!(
+        summary.contains("not a path Token Station installs"),
+        "{summary}"
+    );
+    // What it does own still went.
+    assert!(
+        !home
+            .path("data/dbus-1/services/dev.soldunov.TokenStation.service")
+            .exists()
+    );
+}
+
+#[test]
+fn uninstall_stops_the_tray_and_reloads_systemd() {
+    let home = Home::new(&["systemctl"]);
+    integration::setup(
+        &options(DesktopChoice::Other, None),
+        &home.env(),
+        &home.session(Some("sway")),
+        NOW,
+    )
+    .unwrap();
+    integration::uninstall(&home.env(), &home.session(Some("sway"))).unwrap();
+
+    let calls = home.invocations();
+    assert!(
+        calls.contains(&"systemctl --user disable --now token-station.service".to_string()),
+        "{calls:?}"
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|line| *line == "systemctl --user daemon-reload")
+            .count(),
+        2,
+        "once for the install, once after the unit file went: {calls:?}"
+    );
+}
+
+#[test]
+fn the_backup_survives_an_uninstall_that_could_not_restore() {
+    let home = Home::new(&["systemctl"]);
+    let claude = home.path("home/.claude");
+    std::fs::create_dir_all(&claude).unwrap();
+    let settings = claude.join("settings.json");
+    std::fs::write(&settings, r#"{"model": "opus"}"#).unwrap();
+
+    let mut options = options(DesktopChoice::Other, None);
+    options.claude_statusline = true;
+    integration::setup(&options, &home.env(), &home.session(None), NOW).unwrap();
+    let backup = claude.join("settings.json.token-station-backup");
+    assert!(backup.exists());
+
+    // Someone else owns the status line now, so there is nothing to put back.
+    std::fs::write(
+        &settings,
+        r#"{"statusLine": {"type": "command", "command": "theirs"}}"#,
+    )
+    .unwrap();
+
+    let summary = integration::uninstall(&home.env(), &home.session(None)).unwrap();
+    assert!(summary.contains("different statusLine"), "{summary}");
+    assert!(
+        backup.exists(),
+        "the only copy of the original must not be deleted"
+    );
+    assert!(summary.contains("kept the backup"), "{summary}");
 }

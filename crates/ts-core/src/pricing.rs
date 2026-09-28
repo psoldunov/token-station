@@ -220,31 +220,31 @@ mod tests {
         assert!(p.lookup("mystery-model").is_none());
     }
 
+    /// Cost `model`/`counts` against `table()` and assert it matches `expected`.
+    fn assert_cost(model: &str, counts: TokenCounts, expected: f64) {
+        let c = table().cost(model, &counts).unwrap();
+        assert!((c - expected).abs() < 1e-9, "got {c}, expected {expected}");
+    }
+
     #[test]
     fn cost_uses_each_bucket_price() {
-        let p = table();
-        let c = p
-            .cost("claude-sonnet-4-5", &counts(1_000, 100, 10_000, 2_000))
-            .unwrap();
         let expected = 1_000.0 * 3e-6 + 100.0 * 1.5e-5 + 10_000.0 * 3e-7 + 2_000.0 * 3.75e-6;
-        assert!((c - expected).abs() < 1e-12);
+        assert_cost(
+            "claude-sonnet-4-5",
+            counts(1_000, 100, 10_000, 2_000),
+            expected,
+        );
     }
 
     #[test]
     fn long_context_tier_applies_above_threshold() {
-        let p = table();
-        let c = p
-            .cost("claude-sonnet-4-5", &counts(250_000, 1_000, 0, 0))
-            .unwrap();
         let expected = 250_000.0 * 6e-6 + 1_000.0 * 2.25e-5;
-        assert!((c - expected).abs() < 1e-9);
+        assert_cost("claude-sonnet-4-5", counts(250_000, 1_000, 0, 0), expected);
     }
 
     #[test]
     fn missing_cache_prices_fall_back_to_input_price() {
-        let p = table();
-        let c = p.cost("gpt-5.3-codex", &counts(0, 0, 0, 1_000)).unwrap();
-        assert!((c - 1_000.0 * 1.25e-6).abs() < 1e-12);
+        assert_cost("gpt-5.3-codex", counts(0, 0, 0, 1_000), 1_000.0 * 1.25e-6);
     }
 
     #[test]

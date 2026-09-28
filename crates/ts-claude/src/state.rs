@@ -24,15 +24,28 @@ pub struct LimitsState {
 const HARD_FLOOR_SECS: i64 = 30;
 const BACKOFF_BASE_SECS: u64 = 300;
 const BACKOFF_CAP_SECS: u64 = 3600;
+/// Upper bound on a Claude-supplied `Retry-After` in seconds, so a corrupt or
+/// hostile response cannot push `backoff_until` far enough to overflow `i64`
+/// arithmetic (or just wedge the provider for an absurd length of time).
+const MAX_RETRY_AFTER_SECS: i64 = 24 * 3600;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
     Proceed,
+    /// A real, persistent reason not to refresh (backoff, disabled, ...):
+    /// worth recording as the provider's last outcome.
     Skip(String),
+    /// The scheduler ticked inside the soft interval floor. Not recorded as
+    /// the last outcome: it says nothing about data health and would flip a
+    /// previously-`Ok` state to `Stale` on every fast tick.
+    SoftSkip(String),
 }
 
-/// Whether `refresh_limits` should actually call the network.
-pub fn decide(state: &LimitsState, config: &ClaudeConfig, now: i64, force: bool) -> Decision {
+/// Whether `refresh_limits` should actually call the network. When this
+/// returns [`Decision::Proceed`], `state.last_attempt_at` has already been set
+/// to `now`, in the same lock acquisition the caller used to read `state`, so
+/// two concurrent callers can never both observe `Proceed`.
+pub fn decide(state: &mut LimitsState, config: &ClaudeConfig, now: i64, force: bool) -> Decision {
     if !config.use_oauth_endpoint {
         return Decision::Skip("Claude oauth usage endpoint is disabled in settings.".to_string());
     }
@@ -59,9 +72,10 @@ pub fn decide(state: &LimitsState, config: &ClaudeConfig, now: i64, force: bool)
             (config.min_endpoint_interval_secs as i64).max(HARD_FLOOR_SECS)
         };
         if now - last < floor {
-            return Decision::Skip("Refreshed too recently.".to_string());
+            return Decision::SoftSkip("Refreshed too recently.".to_string());
         }
     }
+    state.last_attempt_at = Some(now);
     Decision::Proceed
 }
 
@@ -74,7 +88,10 @@ pub fn backoff_after_rate_limit(
     now: i64,
 ) -> (i64, u64) {
     match retry_after_secs {
-        Some(secs) => (now + secs as i64, prior_current_secs),
+        Some(secs) => {
+            let clamped = secs.min(MAX_RETRY_AFTER_SECS as u64) as i64;
+            (now.saturating_add(clamped), prior_current_secs)
+        }
         None => {
             let base = min_endpoint_interval_secs.max(BACKOFF_BASE_SECS);
             let secs = if prior_current_secs == 0 {
@@ -82,7 +99,7 @@ pub fn backoff_after_rate_limit(
             } else {
                 (prior_current_secs * 2).min(BACKOFF_CAP_SECS)
             };
-            (now + secs as i64, secs)
+            (now.saturating_add(secs as i64), secs)
         }
     }
 }
@@ -265,9 +282,16 @@ mod tests {
     #[test]
     fn decide_proceeds_by_default() {
         assert_eq!(
-            decide(&LimitsState::default(), &config(), 1000, false),
+            decide(&mut LimitsState::default(), &config(), 1000, false),
             Decision::Proceed
         );
+    }
+
+    #[test]
+    fn decide_records_last_attempt_when_proceeding() {
+        let mut st = LimitsState::default();
+        decide(&mut st, &config(), 1000, false);
+        assert_eq!(st.last_attempt_at, Some(1000));
     }
 
     #[test]
@@ -275,56 +299,75 @@ mod tests {
         let mut c = config();
         c.use_oauth_endpoint = false;
         assert!(matches!(
-            decide(&LimitsState::default(), &c, 0, false),
+            decide(&mut LimitsState::default(), &c, 0, false),
             Decision::Skip(_)
         ));
     }
 
     #[test]
     fn decide_skips_during_429_backoff_even_when_forced() {
-        let st = LimitsState {
+        let mut st = LimitsState {
             backoff_until: Some(1000),
             ..Default::default()
         };
         assert!(matches!(
-            decide(&st, &config(), 500, true),
+            decide(&mut st, &config(), 500, true),
             Decision::Skip(_)
         ));
     }
 
+    /// `decide` soft-skips at `skip_now`, then proceeds at `proceed_now`.
+    fn assert_soft_skip_then_proceed(
+        mut st: LimitsState,
+        c: &ClaudeConfig,
+        skip_now: i64,
+        proceed_now: i64,
+        force: bool,
+    ) {
+        assert!(matches!(
+            decide(&mut st, c, skip_now, force),
+            Decision::SoftSkip(_)
+        ));
+        assert_eq!(decide(&mut st, c, proceed_now, force), Decision::Proceed);
+    }
+
     #[test]
-    fn decide_respects_soft_floor_unless_forced() {
+    fn decide_soft_skips_within_interval_but_proceeds_after() {
+        // min_endpoint_interval_secs = 180
         let st = LimitsState {
             last_attempt_at: Some(1000),
             ..Default::default()
         };
-        let c = config(); // min_endpoint_interval_secs = 180
-        assert!(matches!(decide(&st, &c, 1010, false), Decision::Skip(_)));
-        assert_eq!(decide(&st, &c, 1200, false), Decision::Proceed);
+        assert_soft_skip_then_proceed(st, &config(), 1010, 1200, false);
     }
 
     #[test]
     fn decide_force_bypasses_soft_floor_but_not_hard_floor() {
+        // force bypasses the 180s soft floor but not the 30s hard floor.
         let st = LimitsState {
             last_attempt_at: Some(1000),
             ..Default::default()
         };
-        let c = config();
-        assert!(matches!(decide(&st, &c, 1010, true), Decision::Skip(_))); // still < 30s
-        assert_eq!(decide(&st, &c, 1031, true), Decision::Proceed);
+        assert_soft_skip_then_proceed(st, &config(), 1010, 1031, true);
     }
 
     #[test]
     fn decide_skips_when_endpoint_disabled_by_403() {
-        let st = LimitsState {
+        let mut st = LimitsState {
             endpoint_disabled: true,
             disabled_message: Some("no scope".into()),
             ..Default::default()
         };
-        match decide(&st, &config(), 0, true) {
+        match decide(&mut st, &config(), 0, true) {
             Decision::Skip(msg) => assert_eq!(msg, "no scope"),
             _ => panic!("expected skip"),
         }
+    }
+
+    #[test]
+    fn backoff_clamps_huge_retry_after_instead_of_overflowing() {
+        let (until, _) = backoff_after_rate_limit(0, Some(u64::MAX), 180, 1000);
+        assert_eq!(until, 1000 + MAX_RETRY_AFTER_SECS);
     }
 
     #[test]

@@ -46,14 +46,17 @@ struct Session {
     last_used: Instant,
 }
 
-/// Everything [`refresh_limits`](CodexProvider::refresh_limits) and
-/// [`refresh_tokens`](CodexProvider::refresh_tokens) mutate. Kept behind one
-/// async mutex; [`CodexProvider::snapshot`] never touches it.
+/// Everything [`refresh_limits`](CodexProvider::refresh_limits) mutates. Kept
+/// behind one async mutex; [`CodexProvider::snapshot`] never touches it.
+///
+/// The rollout `scanner` deliberately lives outside this struct, behind its
+/// own lock: it is `refresh_tokens`'s only dependency, and a slow
+/// `refresh_limits` attempt (app-server call, HTTP fallback) must never block
+/// token scanning by holding this lock the whole time.
 struct Inner {
     session: Option<Session>,
     process_backoff: Backoff,
     limits_backoff: Backoff,
-    scanner: RolloutScanner,
     last_rollout_rate_limits: Option<(i64, RateLimitSnapshotDto)>,
 }
 
@@ -94,6 +97,7 @@ pub struct CodexProvider {
     pricing: SharedPricing,
     env: CodexEnv,
     inner: Arc<TokioMutex<Inner>>,
+    scanner: TokioMutex<RolloutScanner>,
     cached: StdRwLock<Cached>,
     ledger: StdRwLock<TokenLedger>,
     scheduling: StdRwLock<Scheduling>,
@@ -115,9 +119,9 @@ impl CodexProvider {
                 session: None,
                 process_backoff: Backoff::new(Duration::from_secs(5), Duration::from_secs(300)),
                 limits_backoff: Backoff::new(Duration::from_secs(60), Duration::from_secs(1800)),
-                scanner: RolloutScanner::new(),
                 last_rollout_rate_limits: None,
             })),
+            scanner: TokioMutex::new(RolloutScanner::new()),
             cached: StdRwLock::new(Cached::default()),
             ledger: StdRwLock::new(TokenLedger::new()),
             scheduling: StdRwLock::new(Scheduling::default()),
@@ -161,6 +165,10 @@ struct Payload {
     windows: Vec<UsageWindow>,
     credits: Option<Credits>,
     account_tokens: Option<AccountTokens>,
+    /// When `Some`, the moment the underlying data was actually observed
+    /// (used by the rollout fallback, whose data can be old); `None` means
+    /// "fresh as of now", the caller's own timestamp.
+    updated_at: Option<i64>,
 }
 
 fn unauthenticated_payload(message: String) -> Payload {
@@ -171,6 +179,7 @@ fn unauthenticated_payload(message: String) -> Payload {
         windows: Vec::new(),
         credits: None,
         account_tokens: None,
+        updated_at: None,
     }
 }
 
@@ -202,6 +211,73 @@ fn classify_call_result(
     })
 }
 
+/// An early exit from one `try_app_server` step: either a definitive payload
+/// (e.g. the app-server says we're unauthenticated) or a hard failure that
+/// aborts the whole attempt. Threading this through `?` keeps each step
+/// function's own control flow small, which is what actually lowers
+/// `try_app_server`'s complexity (splitting a function into pieces that all
+/// still get inlined into one match does not).
+enum StepOutcome {
+    Payload(Box<Payload>),
+    Error(String),
+}
+
+impl From<CallOutcome> for StepOutcome {
+    fn from(outcome: CallOutcome) -> StepOutcome {
+        match outcome {
+            CallOutcome::Unauthenticated(msg) => {
+                StepOutcome::Payload(Box::new(unauthenticated_payload(msg)))
+            }
+            CallOutcome::Failed(msg) => StepOutcome::Error(msg),
+        }
+    }
+}
+
+fn resolve_step(outcome: StepOutcome) -> Result<Payload, String> {
+    match outcome {
+        StepOutcome::Payload(payload) => Ok(*payload),
+        StepOutcome::Error(message) => Err(message),
+    }
+}
+
+fn api_key_payload() -> Payload {
+    Payload {
+        state: ProviderState::Ok,
+        message: Some(API_KEY_MESSAGE.to_string()),
+        plan: Some("API key".to_string()),
+        windows: Vec::new(),
+        credits: None,
+        account_tokens: None,
+        updated_at: None,
+    }
+}
+
+fn build_ok_payload(
+    limits: &RateLimitsReadResult,
+    account: &AccountReadResult,
+    account_tokens: Option<AccountTokens>,
+    now: i64,
+) -> Payload {
+    let (windows, credits, limits_plan) = map_rate_limits(limits, now);
+    let account_plan = match &account.account {
+        Some(AccountInfo::Chatgpt { plan_type: Some(p) }) => Some(plan_label(p)),
+        _ => None,
+    };
+    let message = match limits.ordinary_usage_allowed {
+        Some(false) => Some(USAGE_LIMIT_MESSAGE.to_string()),
+        _ => None,
+    };
+    Payload {
+        state: ProviderState::Ok,
+        message,
+        plan: limits_plan.or(account_plan),
+        windows,
+        credits,
+        account_tokens,
+        updated_at: None,
+    }
+}
+
 fn looks_like_auth_error(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     ["auth", "401", "unauthorized", "login"]
@@ -221,7 +297,7 @@ impl Provider for CodexProvider {
             let ready = self
                 .scheduling
                 .read()
-                .unwrap()
+                .unwrap_or_else(|e| e.into_inner())
                 .backoff_resume_at
                 .map(|t| now >= t)
                 .unwrap_or(true);
@@ -257,10 +333,14 @@ impl Provider for CodexProvider {
         };
         drop(inner);
         self.schedule_idle_shutdown();
-        self.scheduling.write().unwrap().backoff_resume_at = resume_at;
+        self.scheduling
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .backoff_resume_at = resume_at;
 
         match attempt {
             Ok(payload) => {
+                let updated_at = payload.updated_at.or(Some(now));
                 self.publish(Cached {
                     state: payload.state,
                     message: payload.message,
@@ -268,12 +348,16 @@ impl Provider for CodexProvider {
                     windows: payload.windows,
                     credits: payload.credits,
                     account_tokens: payload.account_tokens,
-                    updated_at: Some(now),
+                    updated_at,
                 });
                 RefreshOutcome::Updated
             }
             Err(message) => {
-                let mut cached = self.cached.read().unwrap().clone();
+                let mut cached = self
+                    .cached
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
                 cached.state = if cached.updated_at.is_some() {
                     ProviderState::Stale
                 } else {
@@ -289,9 +373,11 @@ impl Provider for CodexProvider {
     async fn refresh_tokens(&self) {
         let homes = self.resolve_homes();
         let now = Self::now_unix();
+        // Own lock, separate from `inner`: a slow `refresh_limits` attempt
+        // holding `inner` must never block this scan.
         let scanner = {
-            let mut inner = self.inner.lock().await;
-            std::mem::take(&mut inner.scanner)
+            let mut guard = self.scanner.lock().await;
+            std::mem::take(&mut *guard)
         };
         let (scanner, output) = tokio::task::spawn_blocking(move || {
             let mut scanner = scanner;
@@ -305,24 +391,22 @@ impl Provider for CodexProvider {
                 crate::rollouts::ScanOutput::default(),
             )
         });
+        *self.scanner.lock().await = scanner;
 
-        {
+        if let Some(latest) = output.latest_rate_limits {
             let mut inner = self.inner.lock().await;
-            inner.scanner = scanner;
-            if let Some(latest) = output.latest_rate_limits {
-                inner.last_rollout_rate_limits = Some(latest);
-            }
+            inner.last_rollout_rate_limits = Some(latest);
         }
-        let mut ledger = self.ledger.write().unwrap();
+        let mut ledger = self.ledger.write().unwrap_or_else(|e| e.into_inner());
         *ledger = std::mem::take(&mut *ledger)
             .with_events(output.events)
             .pruned(now - TOKEN_RETENTION_SECS);
     }
 
     fn snapshot(&self, now: i64) -> ProviderSnapshot {
-        let cached = self.cached.read().unwrap();
-        let ledger = self.ledger.read().unwrap();
-        let pricing = self.pricing.read().unwrap();
+        let cached = self.cached.read().unwrap_or_else(|e| e.into_inner());
+        let ledger = self.ledger.read().unwrap_or_else(|e| e.into_inner());
+        let pricing = self.pricing.read().unwrap_or_else(|e| e.into_inner());
         let tokens = if ledger.is_empty() {
             None
         } else {
@@ -345,7 +429,7 @@ impl Provider for CodexProvider {
     }
 
     fn next_limits_refresh(&self, now: i64, default_interval: Duration) -> Duration {
-        let info = *self.scheduling.read().unwrap();
+        let info = *self.scheduling.read().unwrap_or_else(|e| e.into_inner());
         let mut delay = default_interval;
         if let Some(resume_at) = info.backoff_resume_at {
             if resume_at > now {
@@ -391,8 +475,11 @@ impl CodexProvider {
 
     fn publish(&self, cached: Cached) {
         let earliest_reset_at = cached.windows.iter().filter_map(|w| w.resets_at).min();
-        self.scheduling.write().unwrap().earliest_reset_at = earliest_reset_at;
-        *self.cached.write().unwrap() = cached;
+        self.scheduling
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .earliest_reset_at = earliest_reset_at;
+        *self.cached.write().unwrap_or_else(|e| e.into_inner()) = cached;
     }
 
     /// Try the app-server first (if a binary was found), then the HTTP
@@ -422,15 +509,23 @@ impl CodexProvider {
 
         if let Some((ts, snapshot)) = &inner.last_rollout_rate_limits {
             let limit_id = snapshot.limit_id.as_deref().unwrap_or("codex");
-            let windows = map_rate_limit_snapshot(limit_id, snapshot, *ts, "rollout");
+            let windows: Vec<UsageWindow> =
+                map_rate_limit_snapshot(limit_id, snapshot, *ts, "rollout")
+                    .into_iter()
+                    .map(|w| crate::windows::apply_rollover(w, now))
+                    .collect();
             if !windows.is_empty() {
+                // This data can be arbitrarily old (the last time a rollout
+                // line carried rate limits), so it is reported `Stale` with
+                // its own timestamp, never `Ok` with `now`.
                 return Ok(Payload {
-                    state: ProviderState::Ok,
+                    state: ProviderState::Stale,
                     message: Some(ROLLOUT_FALLBACK_MESSAGE.to_string()),
                     plan: snapshot.plan_type.as_deref().map(plan_label),
                     windows,
                     credits: None,
                     account_tokens: None,
+                    updated_at: Some(*ts),
                 });
             }
         }
@@ -481,8 +576,12 @@ impl CodexProvider {
         Ok(())
     }
 
-    /// Call `method` on the current session, tearing the session down (and
-    /// applying process backoff) on any non-definitive failure.
+    /// Call `method` on the current session. The session (and process
+    /// backoff) is only torn down on a transport-level failure (timeout or
+    /// closed connection): a remote error *response* means the process is
+    /// still alive and able to serve the next call, so tearing it down would
+    /// throw away a perfectly good session over what might be one
+    /// unsupported/optional method.
     async fn call_on_session(
         &self,
         inner: &mut Inner,
@@ -491,20 +590,17 @@ impl CodexProvider {
         timeout: Duration,
         now: i64,
     ) -> Result<serde_json::Value, CallOutcome> {
-        let result = inner
-            .session
-            .as_ref()
-            .expect("ensure_session was called first")
-            .process
-            .client
-            .call(method, params, timeout)
-            .await;
-        classify_call_result(result).inspect_err(|outcome| {
-            if let CallOutcome::Failed(_) = outcome {
-                inner.session = None;
-                inner.process_backoff.fail(now);
-            }
-        })
+        let Some(session) = inner.session.as_ref() else {
+            return Err(CallOutcome::Failed(
+                "app-server session missing (unexpected)".to_string(),
+            ));
+        };
+        let result = session.process.client.call(method, params, timeout).await;
+        if matches!(result, Err(RpcCallError::Timeout | RpcCallError::Closed)) {
+            inner.session = None;
+            inner.process_backoff.fail(now);
+        }
+        classify_call_result(result)
     }
 
     async fn try_app_server(
@@ -514,70 +610,106 @@ impl CodexProvider {
         now: i64,
     ) -> Result<Payload, String> {
         self.ensure_session(inner, binary, now)?;
-        let timeout = if inner.session.as_ref().unwrap().first_call_done {
+        let Some(session) = inner.session.as_ref() else {
+            return Err("app-server session missing right after ensure_session".to_string());
+        };
+        let timeout = if session.first_call_done {
             Duration::from_secs(15)
         } else {
             Duration::from_secs(30)
         };
 
-        if !inner.session.as_ref().unwrap().handshaked {
-            let params = serde_json::json!({
-                "clientInfo": {
-                    "name": "token-station",
-                    "title": "Token Station",
-                    "version": env!("CARGO_PKG_VERSION"),
-                }
-            });
-            match self
-                .call_on_session(inner, "initialize", params, timeout, now)
-                .await
-            {
-                Ok(_) => {}
-                Err(CallOutcome::Unauthenticated(msg)) => return Ok(unauthenticated_payload(msg)),
-                Err(CallOutcome::Failed(msg)) => return Err(msg),
-            }
-            inner
-                .session
-                .as_ref()
-                .unwrap()
-                .process
-                .client
-                .notify("initialized", serde_json::Value::Null);
-            inner.session.as_mut().unwrap().handshaked = true;
+        if let Err(outcome) = self.ensure_handshake(inner, timeout, now).await {
+            return resolve_step(outcome);
         }
-
-        let account_value = match self
-            .call_on_session(inner, "account/read", serde_json::json!({}), timeout, now)
-            .await
-        {
-            Ok(v) => v,
-            Err(CallOutcome::Unauthenticated(msg)) => return Ok(unauthenticated_payload(msg)),
-            Err(CallOutcome::Failed(msg)) => return Err(msg),
+        let account = match self.fetch_account(inner, timeout, now).await {
+            Ok(account) => account,
+            Err(outcome) => return resolve_step(outcome),
         };
-        {
-            let session = inner.session.as_mut().unwrap();
-            session.last_used = Instant::now();
-            session.first_call_done = true;
-        }
-
-        let account: AccountReadResult = serde_json::from_value(account_value).unwrap_or_default();
         if account.account.is_none() && account.requires_openai_auth {
             inner.process_backoff.succeed();
             return Ok(unauthenticated_payload(NOT_SIGNED_IN_MESSAGE.to_string()));
         }
         if matches!(account.account, Some(AccountInfo::ApiKey {})) {
             inner.process_backoff.succeed();
-            return Ok(Payload {
-                state: ProviderState::Ok,
-                message: Some(API_KEY_MESSAGE.to_string()),
-                plan: Some("API key".to_string()),
-                windows: Vec::new(),
-                credits: None,
-                account_tokens: None,
-            });
+            return Ok(api_key_payload());
         }
 
-        let limits_value = match self
+        let limits = match self.fetch_rate_limits(inner, now).await {
+            Ok(limits) => limits,
+            Err(outcome) => return resolve_step(outcome),
+        };
+        // `account/usage/read` is optional: some app-server versions do not
+        // implement it (-32600), and a failure or unreadable response here
+        // must not discard the rate limits already fetched above.
+        let account_tokens = match self.fetch_account_tokens(inner, now).await {
+            Ok(tokens) => tokens,
+            Err(outcome) => return resolve_step(outcome),
+        };
+
+        inner.process_backoff.succeed();
+        Ok(build_ok_payload(&limits, &account, account_tokens, now))
+    }
+
+    /// Send `initialize`/`initialized` if the session hasn't handshaked yet.
+    async fn ensure_handshake(
+        &self,
+        inner: &mut Inner,
+        timeout: Duration,
+        now: i64,
+    ) -> Result<(), StepOutcome> {
+        if inner.session.as_ref().is_some_and(|s| s.handshaked) {
+            return Ok(());
+        }
+        let params = serde_json::json!({
+            "clientInfo": {
+                "name": "token-station",
+                "title": "Token Station",
+                "version": env!("CARGO_PKG_VERSION"),
+            }
+        });
+        self.call_on_session(inner, "initialize", params, timeout, now)
+            .await
+            .map_err(StepOutcome::from)?;
+        let Some(session) = inner.session.as_mut() else {
+            return Err(StepOutcome::Error(
+                "app-server session dropped mid-handshake".to_string(),
+            ));
+        };
+        session
+            .process
+            .client
+            .notify("initialized", serde_json::Value::Null);
+        session.handshaked = true;
+        Ok(())
+    }
+
+    async fn fetch_account(
+        &self,
+        inner: &mut Inner,
+        timeout: Duration,
+        now: i64,
+    ) -> Result<AccountReadResult, StepOutcome> {
+        let value = self
+            .call_on_session(inner, "account/read", serde_json::json!({}), timeout, now)
+            .await
+            .map_err(StepOutcome::from)?;
+        let Some(session) = inner.session.as_mut() else {
+            return Err(StepOutcome::Error(
+                "app-server session dropped after account/read".to_string(),
+            ));
+        };
+        session.last_used = Instant::now();
+        session.first_call_done = true;
+        Ok(serde_json::from_value(value).unwrap_or_default())
+    }
+
+    async fn fetch_rate_limits(
+        &self,
+        inner: &mut Inner,
+        now: i64,
+    ) -> Result<RateLimitsReadResult, StepOutcome> {
+        let value = self
             .call_on_session(
                 inner,
                 "account/rateLimits/read",
@@ -586,14 +718,22 @@ impl CodexProvider {
                 now,
             )
             .await
-        {
-            Ok(v) => v,
-            Err(CallOutcome::Unauthenticated(msg)) => return Ok(unauthenticated_payload(msg)),
-            Err(CallOutcome::Failed(msg)) => return Err(msg),
-        };
-        let limits: RateLimitsReadResult = serde_json::from_value(limits_value).unwrap_or_default();
+            .map_err(StepOutcome::from)?;
+        // Core data: an unrecognized response shape must fail the attempt
+        // rather than silently report zero windows via `unwrap_or_default`.
+        serde_json::from_value(value).map_err(|e| {
+            StepOutcome::Error(format!(
+                "unexpected account/rateLimits/read response shape: {e}"
+            ))
+        })
+    }
 
-        let usage_value = match self
+    async fn fetch_account_tokens(
+        &self,
+        inner: &mut Inner,
+        now: i64,
+    ) -> Result<Option<AccountTokens>, StepOutcome> {
+        match self
             .call_on_session(
                 inner,
                 "account/usage/read",
@@ -603,34 +743,25 @@ impl CodexProvider {
             )
             .await
         {
-            Ok(v) => v,
-            Err(CallOutcome::Unauthenticated(msg)) => return Ok(unauthenticated_payload(msg)),
-            Err(CallOutcome::Failed(msg)) => return Err(msg),
-        };
-        let usage: UsageReadResult = serde_json::from_value(usage_value).unwrap_or_default();
-
-        inner.process_backoff.succeed();
-        let (windows, credits, limits_plan) = map_rate_limits(&limits, now);
-        let account_plan = match &account.account {
-            Some(AccountInfo::Chatgpt { plan_type: Some(p) }) => Some(plan_label(p)),
-            _ => None,
-        };
-        let message = match limits.ordinary_usage_allowed {
-            Some(false) => Some(USAGE_LIMIT_MESSAGE.to_string()),
-            _ => None,
-        };
-        Ok(Payload {
-            state: ProviderState::Ok,
-            message,
-            plan: limits_plan.or(account_plan),
-            windows,
-            credits,
-            account_tokens: Some(map_account_tokens(
-                &usage,
-                DateTime::<Utc>::from_timestamp(now, 0).unwrap_or_else(Utc::now),
-                &Local,
-            )),
-        })
+            Ok(v) => match serde_json::from_value::<UsageReadResult>(v) {
+                Ok(usage) => Ok(Some(map_account_tokens(
+                    &usage,
+                    DateTime::<Utc>::from_timestamp(now, 0).unwrap_or_else(Utc::now),
+                    &Local,
+                ))),
+                Err(e) => {
+                    tracing::debug!(error = %e, "account/usage/read response shape unrecognized");
+                    Ok(None)
+                }
+            },
+            Err(CallOutcome::Unauthenticated(msg)) => {
+                Err(StepOutcome::Payload(Box::new(unauthenticated_payload(msg))))
+            }
+            Err(CallOutcome::Failed(msg)) => {
+                tracing::debug!(message = %msg, "account/usage/read unavailable; continuing without it");
+                Ok(None)
+            }
+        }
     }
 
     async fn try_http_fallback(&self, homes: &[PathBuf], now: i64) -> Result<Payload, String> {
@@ -655,6 +786,7 @@ impl CodexProvider {
                     windows: mapping.windows,
                     credits: mapping.credits,
                     account_tokens: None,
+                    updated_at: None,
                 }),
                 Err(HttpFallbackError::Unauthorized) => {
                     Ok(unauthenticated_payload(NOT_SIGNED_IN_MESSAGE.to_string()))

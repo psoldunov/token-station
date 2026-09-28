@@ -3,6 +3,7 @@
   lib,
   stdenvNoCC,
   glib,
+  jq,
   version,
 }:
 let
@@ -19,7 +20,16 @@ in
     pname = "token-station-plasmoid";
     inherit version;
     src = ../frontends/plasma + "/${plasmoidId}";
-    dontBuild = true;
+    nativeBuildInputs = [ jq ];
+    # KPlugin.Version is what Plasma shows in "Add Widgets"; stamp it from the
+    # workspace version rather than trusting the checked-in copy.
+    buildPhase = ''
+      runHook preBuild
+      jq --arg version ${lib.escapeShellArg version} \
+        '.KPlugin.Version = $version' metadata.json > metadata.stamped.json
+      mv metadata.stamped.json metadata.json
+      runHook postBuild
+    '';
     installPhase = ''
       runHook preInstall
       mkdir -p $out/share/plasma/plasmoids/${plasmoidId}

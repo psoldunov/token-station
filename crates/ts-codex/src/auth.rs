@@ -29,12 +29,15 @@ pub struct AuthTokens {
     pub account_id: String,
 }
 
-#[derive(Debug, Deserialize)]
+// Neither struct derives `Debug`: `AuthFileTokens` holds the raw access token
+// string before it is wrapped in `SecretString`, and a derived `Debug` would
+// let it leak into a log line by accident.
+#[derive(Deserialize)]
 struct AuthFile {
     tokens: Option<AuthFileTokens>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct AuthFileTokens {
     access_token: Option<String>,
     #[serde(default)]

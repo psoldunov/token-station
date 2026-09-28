@@ -76,10 +76,29 @@ fn tokenize(command: &str) -> Vec<String> {
     words
 }
 
+/// Is `program` this binary, or an AppImage of it?
+///
+/// `<something> statusline` is not enough on its own: `ccusage statusline` is a
+/// different tool with the same subcommand, and treating it as ours would drop the
+/// user's status line instead of wrapping it.
+fn is_our_program(program: &str) -> bool {
+    let Some(name) = Path::new(program).file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let lower = name.to_ascii_lowercase();
+    lower == "token-station"
+        || lower == "token_station"
+        || (lower.ends_with(".appimage")
+            && lower.replace(['-', '_'], "").starts_with("tokenstation"))
+}
+
 /// `Some(inner)` when `command` already is a Token Station status line; `inner`
 /// is whatever it was wrapping. `None` when the command belongs to someone else.
 pub fn parse_ours(command: &str) -> Option<Option<String>> {
     let words = tokenize(command);
+    if !words.first().is_some_and(|program| is_our_program(program)) {
+        return None;
+    }
     if words.get(1).map(String::as_str) != Some("statusline") {
         return None;
     }
@@ -213,6 +232,8 @@ pub fn apply(plan: &Plan, recorded: Option<&ClaudeRecord>) -> anyhow::Result<Cla
 ///
 /// Returns `false` when the current value is no longer ours and was left alone.
 pub fn restore(record: &ClaudeRecord) -> anyhow::Result<bool> {
+    // The file may have become a symlink or gone read-only since `setup` ran.
+    check_writable(&record.settings)?;
     let mut members = read_object(&record.settings)?;
     if current_command(&members).as_deref() != Some(record.command.as_str()) {
         return Ok(false);
@@ -229,6 +250,8 @@ pub fn restore(record: &ClaudeRecord) -> anyhow::Result<bool> {
     Ok(true)
 }
 
+/// Rewrite the file. [`write_atomic`] carries the old permission bits over, so a
+/// `settings.json` the user kept at `0600` is not widened to `0644`.
 fn write_json(path: &Path, members: &Members) -> anyhow::Result<()> {
     let mut bytes = serde_json::to_vec_pretty(members)?;
     bytes.push(b'\n');
@@ -293,12 +316,62 @@ mod tests {
             Some(None)
         );
         assert_eq!(
-            parse_ours("'/x' statusline --wrap 'ccusage statusline'"),
+            parse_ours("'/usr/bin/token-station' statusline --wrap 'ccusage statusline'"),
             Some(Some("ccusage statusline".into()))
         );
         assert_eq!(parse_ours("starship prompt"), None);
         assert_eq!(parse_ours(""), None);
         assert_eq!(parse_ours("token-station"), None);
+    }
+
+    #[test]
+    fn another_tools_statusline_subcommand_is_not_ours() {
+        // Wrapping these would be right; claiming them is how the user's own
+        // status line gets thrown away on the next `setup`.
+        assert_eq!(parse_ours("ccusage statusline"), None);
+        assert_eq!(parse_ours("/usr/bin/ccusage statusline --json"), None);
+        assert_eq!(parse_ours("'bunx ccusage' statusline"), None);
+        assert_eq!(parse_ours("npx some-tool statusline"), None);
+    }
+
+    #[test]
+    fn our_program_is_matched_by_name_wherever_it_lives() {
+        assert!(is_our_program("/usr/bin/token-station"));
+        assert!(is_our_program("token-station"));
+        assert!(is_our_program("/opt/TokenStation.AppImage"));
+        assert!(is_our_program("/apps/TokenStation-x86_64.AppImage"));
+        assert!(is_our_program("/apps/token-station-0.1.0-x86_64.AppImage"));
+        assert!(!is_our_program("ccusage"));
+        assert!(!is_our_program("/opt/Other.AppImage"));
+        assert!(!is_our_program(""));
+    }
+
+    #[test]
+    fn a_restricted_settings_file_keeps_its_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, path) = settings_with(r#"{"model": "opus"}"#);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let record = apply(&plan(&path, Path::new(EXEC)).unwrap(), None).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600, "0600 must not widen to 0644");
+        assert!(restore(&record).unwrap());
+        assert_eq!(mode(&path), 0o600, "restore must not widen it either");
+    }
+
+    #[test]
+    fn restore_refuses_a_file_that_became_managed_elsewhere() {
+        let (dir, path) = settings_with(r#"{"model": "opus"}"#);
+        let record = apply(&plan(&path, Path::new(EXEC)).unwrap(), None).unwrap();
+
+        // Someone put the file under Nix (or home-manager) after `setup` ran.
+        let real = dir.path().join("store-settings.json");
+        std::fs::copy(&path, &real).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&real, &path).unwrap();
+
+        let error = restore(&record).unwrap_err().to_string();
+        assert!(error.contains("symlink"), "{error}");
     }
 
     #[test]
@@ -372,60 +445,47 @@ mod tests {
     }
 
     #[test]
-    fn a_symlinked_settings_file_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
-        let real = dir.path().join("store-settings.json");
-        std::fs::write(&real, "{}").unwrap();
-        let link = dir.path().join("settings.json");
-        std::os::unix::fs::symlink(&real, &link).unwrap();
-
-        let error = plan(&link, Path::new(EXEC)).unwrap_err().to_string();
-        assert!(error.contains("symlink"), "{error}");
-        assert!(error.contains("home-manager"), "{error}");
-        // Nothing was touched.
-        assert_eq!(std::fs::read_to_string(&real).unwrap(), "{}");
-    }
-
-    #[test]
-    fn a_missing_or_read_only_file_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("settings.json");
-        assert!(
-            plan(&missing, Path::new(EXEC))
-                .unwrap_err()
-                .to_string()
-                .contains("does not exist")
-        );
-
+    fn a_file_we_must_not_rewrite_is_refused_with_a_reason() {
         use std::os::unix::fs::PermissionsExt;
-        let (_dir, path) = settings_with("{}");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
-        assert!(
-            plan(&path, Path::new(EXEC))
-                .unwrap_err()
-                .to_string()
-                .contains("not writable")
-        );
+        let dir = tempfile::tempdir().unwrap();
+
+        let target = dir.path().join("store-settings.json");
+        std::fs::write(&target, "{}").unwrap();
+        let link = dir.path().join("linked.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let read_only = dir.path().join("read-only.json");
+        std::fs::write(&read_only, "{}").unwrap();
+        std::fs::set_permissions(&read_only, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        for (path, expected) in [
+            (&link, "symlink"),
+            (&link, "home-manager"),
+            (&read_only, "not writable"),
+            (&dir.path().join("absent.json"), "does not exist"),
+        ] {
+            let error = plan(path, Path::new(EXEC)).unwrap_err().to_string();
+            assert!(error.contains(expected), "{expected} missing from: {error}");
+        }
+        // Nothing was touched on the way through.
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "{}");
+        assert_eq!(std::fs::read_to_string(&read_only).unwrap(), "{}");
     }
 
     #[test]
-    fn restore_puts_back_what_was_there() {
-        let (_dir, path) = settings_with(
+    fn restore_puts_back_exactly_what_was_there_before() {
+        // A status line that existed comes back; one that did not is removed again.
+        let (_dir, had_one) = settings_with(
             r#"{"model": "opus", "statusLine": {"type": "command", "command": "starship"}}"#,
         );
-        let record = apply(&plan(&path, Path::new(EXEC)).unwrap(), None).unwrap();
-        assert!(restore(&record).unwrap());
-        assert_eq!(read(&path)["statusLine"]["command"], "starship");
-        assert_eq!(read(&path)["model"], "opus");
-    }
-
-    #[test]
-    fn restore_removes_the_key_when_there_was_none() {
-        let (_dir, path) = settings_with(r#"{"model": "opus"}"#);
-        let record = apply(&plan(&path, Path::new(EXEC)).unwrap(), None).unwrap();
-        assert!(restore(&record).unwrap());
-        assert!(read(&path).get("statusLine").is_none());
-        assert_eq!(read(&path)["model"], "opus");
+        let (_dir2, had_none) = settings_with(r#"{"model": "opus"}"#);
+        for path in [&had_one, &had_none] {
+            let record = apply(&plan(path, Path::new(EXEC)).unwrap(), None).unwrap();
+            assert!(restore(&record).unwrap(), "{}", path.display());
+            assert_eq!(read(path)["model"], "opus", "every other key survives");
+        }
+        assert_eq!(read(&had_one)["statusLine"]["command"], "starship");
+        assert!(read(&had_none).get("statusLine").is_none());
     }
 
     #[test]

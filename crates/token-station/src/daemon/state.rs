@@ -4,21 +4,25 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
-use ts_core::alerts::{self, AlertState};
+use ts_core::alerts::{self, Alert, AlertState};
 use ts_core::assemble::assemble;
 use ts_core::config::Config;
 use ts_core::pricing::SharedPricing;
 use ts_core::{Ingest, IngestError, Provider, ProviderId, ProviderSnapshot, ProviderState};
 
-use crate::atomic::{modified_secs, write_atomic};
+use crate::atomic::{Fingerprint, fingerprint, modified_secs, write_atomic};
 use crate::backend::Backend;
 use crate::clock::Clock;
 use crate::daemon::providers;
 use crate::history::{HistoryHandle, OwnedSample};
 use crate::notify::{self, Notifier};
 use crate::paths::Paths;
+use crate::pricing_refresh;
 use crate::publish::Publisher;
 use crate::settings;
+
+/// A dropped statusline older than this describes a session that is long over.
+pub const STATUSLINE_DROP_MAX_AGE_SECS: i64 = 10 * 60;
 
 /// Everything one running daemon owns.
 pub struct Daemon {
@@ -26,7 +30,11 @@ pub struct Daemon {
     pub publisher: Arc<Publisher>,
     pricing: SharedPricing,
     config: RwLock<Config>,
-    config_mtime: Mutex<Option<i64>>,
+    /// Identity of `config.toml` as last seen, for the hot reload.
+    config_stamp: Mutex<Option<Fingerprint>>,
+    /// Held for the whole of [`Daemon::apply_config`], so two settings changes
+    /// cannot interleave their rebuilds.
+    apply_lock: tokio::sync::Mutex<()>,
     providers: RwLock<BTreeMap<ProviderId, Arc<dyn Provider>>>,
     history: HistoryHandle,
     alert_state: Mutex<AlertState>,
@@ -65,7 +73,8 @@ impl Daemon {
         let publisher = Publisher::new(assemble(1, now, &snapshots, &config));
         let alert_state = load_alert_state(&paths.alerts_file());
         Arc::new(Daemon {
-            config_mtime: Mutex::new(modified_secs(&paths.config_file)),
+            config_stamp: Mutex::new(fingerprint(&paths.config_file)),
+            apply_lock: tokio::sync::Mutex::new(()),
             paths,
             publisher,
             pricing,
@@ -148,7 +157,7 @@ impl Daemon {
         let now = self.now();
         let snapshots = self.snapshots();
         self.record_history(&snapshots, now).await;
-        self.run_alerts(&snapshots, now);
+        self.run_alerts(&snapshots, now).await;
         self.republish().await;
     }
 
@@ -170,23 +179,41 @@ impl Daemon {
         }
     }
 
-    fn run_alerts(&self, snapshots: &[ProviderSnapshot], now: i64) {
+    async fn run_alerts(&self, snapshots: &[ProviderSnapshot], now: i64) {
+        let (raised, to_store) = self.advance_alert_state(snapshots);
+        if let Some(bytes) = to_store {
+            self.store_alert_state(bytes).await;
+        }
+        notify::deliver(self.notifier.as_ref(), &raised, now).await;
+    }
+
+    /// Fold `snapshots` into the alert state: what to announce, and the JSON to
+    /// store when the state actually moved.
+    fn advance_alert_state(&self, snapshots: &[ProviderSnapshot]) -> (Vec<Alert>, Option<Vec<u8>>) {
         let config = self.config();
         let mut state = lock(&self.alert_state);
         let (raised, next) = alerts::evaluate(&state, snapshots, &config.alerts);
-        if next != *state {
-            *state = next;
-            if let Err(error) = serde_json::to_vec(&*state)
-                .map_err(|e| e.to_string())
-                .and_then(|bytes| {
-                    write_atomic(&self.paths.alerts_file(), &bytes).map_err(|e| e.to_string())
-                })
-            {
-                tracing::warn!(%error, "cannot persist alert state");
+        if next == *state {
+            return (raised, None);
+        }
+        *state = next;
+        match serde_json::to_vec(&*state) {
+            Ok(bytes) => (raised, Some(bytes)),
+            Err(error) => {
+                tracing::warn!(%error, "cannot serialise alert state");
+                (raised, None)
             }
         }
-        drop(state);
-        notify::deliver(self.notifier.as_ref(), &raised, now);
+    }
+
+    /// `write_atomic` fsyncs, so the write belongs on a blocking thread.
+    async fn store_alert_state(&self, bytes: Vec<u8>) {
+        let path = self.paths.alerts_file();
+        match tokio::task::spawn_blocking(move || write_atomic(&path, &bytes)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "cannot persist alert state"),
+            Err(error) => tracing::warn!(%error, "the alert-state write did not run"),
+        }
     }
 
     /// Drop samples older than the retention window, at most once a day.
@@ -209,9 +236,9 @@ impl Daemon {
 
     /// Re-read `config.toml` when it changed on disk.
     pub async fn reload_config_if_changed(&self) {
-        let current = modified_secs(&self.paths.config_file);
+        let current = fingerprint(&self.paths.config_file);
         {
-            let mut seen = lock(&self.config_mtime);
+            let mut seen = lock(&self.config_stamp);
             if *seen == current {
                 return;
             }
@@ -219,29 +246,60 @@ impl Daemon {
         }
         let next = settings::reload(&self.paths.config_file, &self.config());
         tracing::info!("config file changed, applying it");
-        self.apply_config(next, false).await;
+        if let Err(error) = self.apply_config(next, false).await {
+            tracing::warn!(%error, "cannot apply the reloaded config");
+        }
     }
 
     /// Adopt `next`, rebuilding only what its differences require.
-    pub async fn apply_config(&self, next: Config, persist: bool) {
+    ///
+    /// Serialised, so two `SetSettings` calls cannot interleave a rebuild with a
+    /// store and leave the providers built from a config nobody kept.
+    pub async fn apply_config(&self, next: Config, persist: bool) -> Result<(), String> {
+        let _serialised = self.apply_lock.lock().await;
         let change = settings::diff(&self.config(), &next);
         if change.is_empty() {
-            return;
+            return Ok(());
         }
         if persist {
-            if let Err(error) = settings::persist(&next, &self.paths.config_file) {
-                tracing::error!(%error, "cannot write config.toml");
-            }
-            *lock(&self.config_mtime) = modified_secs(&self.paths.config_file);
+            settings::persist(&next, &self.paths.config_file)?;
+            *lock(&self.config_stamp) = fingerprint(&self.paths.config_file);
         }
-        self.rebuild_providers(&next, change);
+        let rebuilt = self.rebuild_providers(&next, change);
         *write(&self.config) = next;
         if change.needs_republish() {
             self.republish().await;
         }
+        self.fill_in(&rebuilt).await;
+        if change.pricing {
+            self.refresh_pricing().await;
+        }
+        Ok(())
     }
 
-    fn rebuild_providers(&self, next: &Config, change: settings::ConfigChange) {
+    /// A rebuilt provider starts out `Loading`; read it now rather than leaving a
+    /// blank tile until the next limits tick, up to [`MAX_SLEEP`] away.
+    ///
+    /// [`MAX_SLEEP`]: crate::daemon::scheduler::MAX_SLEEP
+    async fn fill_in(&self, rebuilt: &[ProviderId]) {
+        if rebuilt.is_empty() {
+            return;
+        }
+        for id in rebuilt {
+            self.refresh_limits(*id, false).await;
+        }
+        self.refresh_tokens().await;
+    }
+
+    /// Update the price table when auto-update is on and the cache is due.
+    pub async fn refresh_pricing(&self) {
+        let config = self.config();
+        let cache = self.paths.pricing_cache();
+        pricing_refresh::refresh_if_due(&config.pricing, &cache, &self.pricing(), self.now()).await;
+    }
+
+    /// Replace the providers whose settings changed; returns which ones moved.
+    fn rebuild_providers(&self, next: &Config, change: settings::ConfigChange) -> Vec<ProviderId> {
         let rebuild: Vec<ProviderId> = [
             (ProviderId::Claude, change.claude),
             (ProviderId::Codex, change.codex),
@@ -250,21 +308,22 @@ impl Daemon {
         .filter_map(|(id, changed)| changed.then_some(id))
         .collect();
         if rebuild.is_empty() {
-            return;
+            return rebuild;
         }
         let mut providers = write(&self.providers);
-        for id in rebuild {
+        for id in &rebuild {
             tracing::info!(provider = %id, "rebuilding provider after a settings change");
-            providers.insert(id, providers::build_one(id, next, &self.pricing));
+            providers.insert(*id, providers::build_one(*id, next, &self.pricing));
         }
+        rebuild
     }
 
-    /// Forward a statusline payload to the Claude provider.
-    pub fn ingest_statusline(&self, payload: &str) -> Result<(), String> {
+    /// Forward a statusline payload to the Claude provider as seen at `observed_at`.
+    pub fn ingest_statusline(&self, payload: &str, observed_at: i64) -> Result<(), String> {
         let Some(provider) = self.provider(ProviderId::Claude) else {
             return Err("the Claude provider is not available".into());
         };
-        match provider.ingest(Ingest::ClaudeStatusline(payload.to_string()), self.now()) {
+        match provider.ingest(Ingest::ClaudeStatusline(payload.to_string()), observed_at) {
             Ok(()) => Ok(()),
             Err(IngestError::Invalid(why)) => Err(why),
             Err(IngestError::Unsupported) => {
@@ -275,11 +334,20 @@ impl Daemon {
     }
 
     /// Pick up a statusline the CLI could not deliver over the bus.
+    ///
+    /// The file's mtime is the observation time: after a restart the drop box may
+    /// hold days-old numbers, and stamping those with `now()` would let them
+    /// override the fresh figures the OAuth reader just produced.
     pub async fn ingest_statusline_file(&self) {
         let path = self.paths.statusline_drop();
         let Some(modified) = modified_secs(&path) else {
             return;
         };
+        let age = self.now() - modified;
+        if age > STATUSLINE_DROP_MAX_AGE_SECS {
+            tracing::debug!(age, "ignoring a dropped statusline from an old session");
+            return;
+        }
         {
             let mut seen = lock(&self.statusline_seen);
             if seen.is_some_and(|t| t >= modified) {
@@ -288,7 +356,7 @@ impl Daemon {
             *seen = Some(modified);
         }
         match std::fs::read_to_string(&path) {
-            Ok(payload) => match self.ingest_statusline(&payload) {
+            Ok(payload) => match self.ingest_statusline(&payload, modified) {
                 Ok(()) => {
                     self.republish().await;
                 }
@@ -317,12 +385,11 @@ impl Backend for Daemon {
 
     async fn set_settings(&self, json: &str) -> Result<(), Vec<String>> {
         let next = settings::parse_settings(json)?;
-        self.apply_config(next, true).await;
-        Ok(())
+        self.apply_config(next, true).await.map_err(|e| vec![e])
     }
 
     async fn ingest_claude_statusline(&self, payload: &str) -> Result<(), String> {
-        self.ingest_statusline(payload)?;
+        self.ingest_statusline(payload, self.now())?;
         self.republish().await;
         Ok(())
     }

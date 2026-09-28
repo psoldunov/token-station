@@ -18,26 +18,6 @@ import "Formatters.js" as Formatters
 PlasmoidItem {
     id: root
 
-    // First child, so the translated unit strings are in place before any sibling
-    // or representation formats a number.
-    QtObject {
-        Component.onCompleted: Formatters.setLabels({
-            "day": i18nc("@item:intext Duration unit, days", "d"),
-            "hour": i18nc("@item:intext Duration unit, hours", "h"),
-            "minute": i18nc("@item:intext Duration unit, minutes", "min"),
-            "second": i18nc("@item:intext Duration unit, seconds", "s"),
-            "thousand": i18nc("@item:intext Token count suffix, thousands", "K"),
-            "million": i18nc("@item:intext Token count suffix, millions", "M"),
-            "billion": i18nc("@item:intext Token count suffix, billions", "B"),
-            "percent": i18nc("@item:intext A percentage, %1 is the number", "%1 %"),
-            "now": i18nc("@item:intext A window that resets right now", "now"),
-            "justNow": i18nc("@item:intext Something that happened seconds ago", "just now"),
-            "ago": i18nc("@item:intext How long ago something happened, %1 is a duration", "%1 ago"),
-            "resetsIn": i18nc("@item:intext When a usage window resets, %1 is a duration", "resets in %1"),
-            "unknown": i18nc("@item:intext No value available", "—")
-        })
-    }
-
     readonly property var snapshot: daemon.snapshot
     readonly property var providers: snapshot && snapshot.providers ? snapshot.providers : []
     readonly property string meterLevel: snapshot && snapshot.meter && snapshot.meter.level ? snapshot.meter.level : "normal"

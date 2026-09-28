@@ -70,6 +70,19 @@ the system tray automatically; on GNOME enable the extension (or set
 A NixOS module (`nixosModules.default`) and an overlay (`overlays.default`) are
 available too; `nix run github:psoldunov/token-station -- status` works without installing.
 
+Installing the package on its own — `nix profile install`, the overlay, or any
+packaging that just puts the files in a profile — gives you the systemd user unit
+(`share/systemd/user/token-station.service`) and the D-Bus activation file, but nothing
+enables the unit. Either let D-Bus activate it (the front ends do that on their own), or
+start it yourself once:
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now token-station
+```
+
+The home-manager and NixOS modules, and the AppImage's `setup`, do this for you.
+
 ### AppImage
 
 Download `TokenStation-x86_64.AppImage` from the releases page, then:
@@ -129,19 +142,26 @@ notify_on_reset = false
 
 [pricing]
 auto_update = true            # refresh LiteLLM prices daily (a bundled table is the fallback)
+url = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
 
 [claude]
 enabled = true
+config_dir = ""               # default: $CLAUDE_CONFIG_DIR, else ~/.claude
+binary = ""                   # default: discover `claude` on PATH and well-known directories
 use_oauth_endpoint = true
 user_agent = ""               # default: claude-code/<installed version>, like the CLI itself
-min_endpoint_interval_secs = 180
+min_endpoint_interval_secs = 180   # shortest gap between two endpoint calls (>= 120)
 
 [codex]
 enabled = true
+binary = ""                   # default: discover `codex` on PATH and well-known directories
+homes = []                    # default: $CODEX_HOME, else ~/.codex
 process_mode = "on_demand"    # on_demand | persistent
 linger_secs = 60
 http_fallback = true
 ```
+
+Unknown keys are rejected, so a typo fails loudly instead of being ignored.
 
 ## Development
 

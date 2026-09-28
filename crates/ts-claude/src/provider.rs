@@ -37,13 +37,29 @@ struct Observations {
     last_endpoint_success_at: Option<i64>,
 }
 
+/// Filesystem/process facts `snapshot` needs but must never fetch itself.
+/// Refreshed from `refresh_limits`/`refresh_tokens`; read as a plain cache.
+#[derive(Debug, Clone, Default)]
+struct IoCache {
+    claude_binary_found: bool,
+    credentials_file_exists: bool,
+    /// Whether the credentials on disk are expired, independent of whether
+    /// we still have window data from another source.
+    credentials_expired: bool,
+    projects_dir_exists: bool,
+}
+
 pub struct ClaudeProvider {
     config: ClaudeConfig,
     pricing: SharedPricing,
     env: ClaudeEnv,
     http: reqwest::Client,
+    // Lock order when more than one is held at once: `limits`, then
+    // `observations`, then `io_cache`. Never acquire them in a different
+    // order, or two call paths taking them in opposite orders can deadlock.
     limits: RwLock<LimitsState>,
     observations: RwLock<Observations>,
+    io_cache: RwLock<IoCache>,
     ledger: Mutex<TokenLedger>,
     scan_state: Mutex<LogScanState>,
     version_cache: Mutex<Option<String>>,
@@ -61,18 +77,24 @@ impl ClaudeProvider {
         let http = reqwest::Client::builder()
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
-        ClaudeProvider {
+        let provider = ClaudeProvider {
             config,
             pricing,
             env,
             http,
             limits: RwLock::new(LimitsState::default()),
             observations: RwLock::new(Observations::default()),
+            io_cache: RwLock::new(IoCache::default()),
             ledger: Mutex::new(TokenLedger::new()),
             scan_state: Mutex::new(LogScanState::default()),
             version_cache: Mutex::new(None),
             binary_cache: Mutex::new(None),
-        }
+        };
+        // Populate the IO cache once up front so a `snapshot()` taken before
+        // the first `refresh_limits`/`refresh_tokens` tick still reflects
+        // reality instead of the all-`false` default.
+        provider.refresh_io_cache(unix_now());
+        provider
     }
 
     fn config_dir(&self) -> PathBuf {
@@ -122,13 +144,12 @@ impl ClaudeProvider {
 
     async fn detect_version(&self) -> Option<String> {
         let bin = self.claude_binary()?;
-        let output = tokio::time::timeout(
-            AUTH_STATUS_TIMEOUT,
-            tokio::process::Command::new(bin).arg("--version").output(),
-        )
-        .await
-        .ok()?
-        .ok()?;
+        let mut cmd = tokio::process::Command::new(bin);
+        cmd.arg("--version").kill_on_drop(true);
+        let output = tokio::time::timeout(AUTH_STATUS_TIMEOUT, cmd.output())
+            .await
+            .ok()?
+            .ok()?;
         if !output.status.success() {
             return None;
         }
@@ -145,15 +166,12 @@ impl ClaudeProvider {
         let Some(bin) = self.claude_binary() else {
             return;
         };
-        let _ = tokio::time::timeout(
-            AUTH_STATUS_TIMEOUT,
-            tokio::process::Command::new(bin)
-                .arg("auth")
-                .arg("status")
-                .arg("--json")
-                .output(),
-        )
-        .await;
+        let mut cmd = tokio::process::Command::new(bin);
+        cmd.arg("auth")
+            .arg("status")
+            .arg("--json")
+            .kill_on_drop(true);
+        let _ = tokio::time::timeout(AUTH_STATUS_TIMEOUT, cmd.output()).await;
     }
 
     fn should_check_auth_status(&self, now: i64) -> bool {
@@ -169,11 +187,24 @@ impl ClaudeProvider {
             .last_auth_status_check = Some(now);
     }
 
-    fn mark_attempt(&self, now: i64) {
-        self.limits
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .last_attempt_at = Some(now);
+    /// Recompute the filesystem/process facts `snapshot` needs, without ever
+    /// holding a lock while doing IO: everything below is plain reads/stats
+    /// into locals, and only the final assignment touches `io_cache`.
+    fn refresh_io_cache(&self, now: i64) {
+        let claude_binary_found = self.claude_binary().is_some();
+        let creds_path = self.credentials_path();
+        let credentials_file_exists = creds_path.exists();
+        let credentials_expired = credentials_file_exists
+            && credentials::load(&creds_path)
+                .map(|c| c.expired(now))
+                .unwrap_or(false);
+        let projects_dir_exists = self.projects_dirs().iter().any(|p| p.exists());
+        *self.io_cache.write().unwrap_or_else(|e| e.into_inner()) = IoCache {
+            claude_binary_found,
+            credentials_file_exists,
+            credentials_expired,
+            projects_dir_exists,
+        };
     }
 
     fn set_last_outcome(&self, outcome: LastOutcome) {
@@ -250,19 +281,21 @@ impl Provider for ClaudeProvider {
 
     async fn refresh_limits(&self, force: bool) -> RefreshOutcome {
         let now = unix_now();
+        self.refresh_io_cache(now);
+        // Check-and-record happens under one write lock so two concurrent
+        // callers can never both observe `Proceed` for the same interval.
         let decision = {
-            let st = self.limits.read().unwrap_or_else(|e| e.into_inner());
-            state::decide(&st, &self.config, now, force)
+            let mut st = self.limits.write().unwrap_or_else(|e| e.into_inner());
+            state::decide(&mut st, &self.config, now, force)
         };
-        let Decision::Proceed = decision else {
-            let Decision::Skip(msg) = decision else {
-                unreachable!()
-            };
-            self.set_last_outcome(LastOutcome::Skipped(msg.clone()));
-            return RefreshOutcome::Skipped(msg);
-        };
-
-        self.mark_attempt(now);
+        match decision {
+            Decision::Proceed => {}
+            Decision::SoftSkip(msg) => return RefreshOutcome::Skipped(msg),
+            Decision::Skip(msg) => {
+                self.set_last_outcome(LastOutcome::Skipped(msg.clone()));
+                return RefreshOutcome::Skipped(msg);
+            }
+        }
 
         let creds_path = self.credentials_path();
         let mut creds = match credentials::load(&creds_path) {
@@ -340,6 +373,7 @@ impl Provider for ClaudeProvider {
     async fn refresh_tokens(&self) {
         let roots = self.projects_dirs();
         let now = unix_now();
+        self.refresh_io_cache(now);
         let mut state = {
             let mut guard = self.scan_state.lock().unwrap_or_else(|e| e.into_inner());
             std::mem::take(&mut *guard)
@@ -363,8 +397,11 @@ impl Provider for ClaudeProvider {
     }
 
     fn snapshot(&self, now: i64) -> ProviderSnapshot {
-        let obs = self.observations.read().unwrap_or_else(|e| e.into_inner());
+        // Fixed lock order (see the field comment on `ClaudeProvider`): never
+        // acquire these in a different order elsewhere.
         let limits = self.limits.read().unwrap_or_else(|e| e.into_inner());
+        let obs = self.observations.read().unwrap_or_else(|e| e.into_inner());
+        let io = self.io_cache.read().unwrap_or_else(|e| e.into_inner());
 
         let windows = state::merge_windows(
             &obs.endpoint_windows,
@@ -383,22 +420,18 @@ impl Provider for ClaudeProvider {
         .max()
         .is_some_and(|t| now - t < STATUSLINE_FRESH_SECS);
 
-        let creds_path = self.credentials_path();
-        let credentials_file_exists = creds_path.exists();
-        let credentials_expired_with_no_data = credentials_file_exists
-            && !has_window_data
-            && credentials::load(&creds_path)
-                .map(|c| c.expired(now))
-                .unwrap_or(false);
+        // No IO here: `io` is refreshed by `refresh_limits`/`refresh_tokens`.
+        let credentials_expired_with_no_data =
+            io.credentials_file_exists && !has_window_data && io.credentials_expired;
 
         let inputs = StateInputs {
-            claude_binary_found: self.claude_binary().is_some(),
-            credentials_file_exists,
+            claude_binary_found: io.claude_binary_found,
+            credentials_file_exists: io.credentials_file_exists,
             credentials_expired_with_no_data,
             last_outcome: limits.last_outcome.clone(),
             has_window_data,
             has_fresh_statusline,
-            projects_dir_exists: self.projects_dirs().iter().any(|p| p.exists()),
+            projects_dir_exists: io.projects_dir_exists,
         };
         let (provider_state, message) = state::provider_state(&inputs);
 

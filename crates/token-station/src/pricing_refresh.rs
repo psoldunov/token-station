@@ -34,6 +34,8 @@ pub enum RefreshError {
     Parse(String),
     #[error("cannot write the pricing cache: {0}")]
     Cache(String),
+    #[error("the pricing update did not run: {0}")]
+    NotRun(String),
 }
 
 /// Read a cached table; a missing or broken cache is simply `None`.
@@ -110,6 +112,22 @@ pub async fn download(url: &str) -> Result<String, RefreshError> {
     String::from_utf8(body).map_err(|_| RefreshError::Encoding)
 }
 
+/// Parse the downloaded document and store it, off the async worker threads.
+///
+/// The table is allowed to be [`MAX_PRICING_BYTES`] long and `write_atomic`
+/// fsyncs, so neither belongs on a thread that is also driving the bus.
+async fn parse_and_cache(text: String, cache_path: &Path) -> Result<Pricing, RefreshError> {
+    let path = cache_path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let fresh =
+            Pricing::from_litellm_json(&text).map_err(|e| RefreshError::Parse(e.to_string()))?;
+        write_atomic(&path, text.as_bytes()).map_err(|e| RefreshError::Cache(e.to_string()))?;
+        Ok(fresh)
+    })
+    .await
+    .map_err(|e| RefreshError::NotRun(e.to_string()))?
+}
+
 /// Download, validate, cache and install a fresh table.
 pub async fn fetch_and_install(
     url: &str,
@@ -117,9 +135,7 @@ pub async fn fetch_and_install(
     shared: &SharedPricing,
 ) -> Result<usize, RefreshError> {
     let text = download(url).await?;
-    let fresh =
-        Pricing::from_litellm_json(&text).map_err(|e| RefreshError::Parse(e.to_string()))?;
-    write_atomic(cache_path, text.as_bytes()).map_err(|e| RefreshError::Cache(e.to_string()))?;
+    let fresh = parse_and_cache(text, cache_path).await?;
     install(shared, &fresh);
     Ok(fresh.len())
 }
@@ -226,6 +242,25 @@ mod tests {
         refresh_if_due(&config, &path, &shared, 1_790_596_800).await;
         assert_eq!(shared.read().unwrap().len(), before);
         assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn parsing_and_caching_happen_on_a_blocking_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested/pricing.json");
+        let fresh = parse_and_cache(TABLE.to_string(), &path).await.unwrap();
+        assert_eq!(fresh.len(), 1);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), TABLE);
+
+        let error = parse_and_cache("not json".to_string(), &path)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, RefreshError::Parse(_)), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            TABLE,
+            "a broken document does not replace the cache"
+        );
     }
 
     #[tokio::test]

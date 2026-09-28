@@ -163,7 +163,7 @@ pub fn downsample(points: &[(i64, f64)], max: usize) -> Vec<(i64, f64)> {
         .filter_map(|i| {
             let start = i * len / max;
             let end = ((i + 1) * len / max).max(start + 1).min(len);
-            let bucket = &points[start..end];
+            let bucket = points.get(start..end)?;
             if bucket.is_empty() {
                 return None;
             }
@@ -285,6 +285,13 @@ mod tests {
         }
     }
 
+    /// The series stored for the Claude session window.
+    fn session_rows(store: &HistoryStore) -> Vec<(i64, f64)> {
+        store
+            .query(ProviderId::Claude, "session", 0)
+            .expect("the query runs")
+    }
+
     fn store_with(samples: &[OwnedSample]) -> HistoryStore {
         let store = HistoryStore::in_memory().unwrap();
         let borrowed: Vec<Sample<'_>> = samples.iter().map(OwnedSample::as_sample).collect();
@@ -315,16 +322,6 @@ mod tests {
     }
 
     #[test]
-    fn re_recording_the_same_instant_replaces_it() {
-        let store = store_with(&[sample("session", 10, 1.0), sample("session", 10, 4.0)]);
-        assert_eq!(store.count().unwrap(), 1);
-        assert_eq!(
-            store.query(ProviderId::Claude, "session", 0).unwrap(),
-            vec![(10, 4.0)]
-        );
-    }
-
-    #[test]
     fn query_filters_by_provider_window_and_since() {
         let store = store_with(&[
             sample("session", 10, 1.0),
@@ -350,13 +347,20 @@ mod tests {
     }
 
     #[test]
-    fn prune_drops_old_rows_only() {
-        let store = store_with(&[sample("session", 10, 1.0), sample("session", 500, 2.0)]);
-        assert_eq!(store.prune(100).unwrap(), 1);
+    fn a_re_recorded_instant_is_replaced_and_only_old_rows_are_pruned() {
+        let store = store_with(&[sample("session", 10, 1.0), sample("session", 10, 4.0)]);
+        assert_eq!(store.count().unwrap(), 1, "the key is the same instant");
         assert_eq!(
-            store.query(ProviderId::Claude, "session", 0).unwrap(),
-            vec![(500, 2.0)]
+            session_rows(&store),
+            vec![(10, 4.0)],
+            "the later value wins"
         );
+
+        store
+            .record(&[sample("session", 500, 2.0).as_sample()])
+            .unwrap();
+        assert_eq!(store.prune(100).unwrap(), 1, "only the older row goes");
+        assert_eq!(session_rows(&store), vec![(500, 2.0)]);
     }
 
     #[test]

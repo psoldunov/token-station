@@ -16,13 +16,16 @@ pub enum CredentialsError {
     Parse(serde_json::Error),
 }
 
-#[derive(Debug, Deserialize)]
+// Neither struct derives `Debug`: both hold the raw access token string
+// before it is wrapped in `SecretString`, and a derived `Debug` would let it
+// leak into a log line by accident.
+#[derive(Deserialize)]
 struct CredentialsFile {
     #[serde(rename = "claudeAiOauth")]
     claude_ai_oauth: OauthCreds,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct OauthCreds {
     #[serde(rename = "accessToken")]
     access_token: String,

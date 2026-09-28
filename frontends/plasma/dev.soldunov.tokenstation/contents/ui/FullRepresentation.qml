@@ -49,6 +49,12 @@ PlasmaExtras.Representation {
     readonly property var providers: snapshot && snapshot.providers ? snapshot.providers : []
     readonly property bool loading: providers.length > 0 && providers.every(provider => provider.state === "loading")
     readonly property bool hasContent: daemonRunning && providers.length > 0 && !loading
+    /*! The daemon is up, but has published no provider at all. */
+    readonly property bool noProviders: daemonRunning && !!snapshot && providers.length === 0
+    /*! Nothing to read yet, and no reason given: still waiting on the first snapshot. */
+    readonly property bool waiting: daemonRunning && !hasContent && !noProviders && errorMessage.length === 0
+    /*! The wait has gone on long enough to be worth explaining. */
+    property bool waitedTooLong: false
 
     /*! `"<providerId>/<windowId>"` to `[[unixSeconds, percent], …]`. */
     property var historyCache: ({})
@@ -154,86 +160,160 @@ PlasmaExtras.Representation {
         }
     }
 
-    contentItem: Item {
-        PlasmaComponents3.ScrollView {
-            id: scrollView
+    contentItem: ColumnLayout {
+        spacing: 0
 
-            anchors.fill: parent
-            contentWidth: availableWidth
-            visible: root.hasContent
-            focus: true
+        // Outside the scroll area: a transport error has to be readable even
+        // when there is no content to scroll.
+        Kirigami.InlineMessage {
+            Layout.fillWidth: true
+            Layout.leftMargin: Kirigami.Units.largeSpacing
+            Layout.rightMargin: Kirigami.Units.largeSpacing
+            Layout.topMargin: Kirigami.Units.smallSpacing
+            type: Kirigami.MessageType.Error
+            text: root.errorMessage
+            // With nothing else on screen the placeholder carries the message.
+            visible: root.errorMessage.length > 0 && root.hasContent
+        }
 
-            PlasmaComponents3.ScrollBar.horizontal.policy: PlasmaComponents3.ScrollBar.AlwaysOff
+        Item {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
 
-            Flickable {
-                contentHeight: sections.implicitHeight
-                contentWidth: scrollView.availableWidth
-                flickableDirection: Flickable.VerticalFlick
+            PlasmaComponents3.ScrollView {
+                id: scrollView
 
-                ColumnLayout {
-                    id: sections
+                anchors.fill: parent
+                contentWidth: availableWidth
+                visible: root.hasContent
+                focus: true
 
-                    width: scrollView.availableWidth
-                    spacing: 0
+                PlasmaComponents3.ScrollBar.horizontal.policy: PlasmaComponents3.ScrollBar.AlwaysOff
 
-                    Kirigami.InlineMessage {
-                        Layout.fillWidth: true
-                        Layout.leftMargin: Kirigami.Units.largeSpacing
-                        Layout.rightMargin: Kirigami.Units.largeSpacing
-                        Layout.topMargin: Kirigami.Units.smallSpacing
-                        type: Kirigami.MessageType.Error
-                        text: root.errorMessage
-                        visible: root.errorMessage.length > 0
-                    }
+                Flickable {
+                    contentHeight: sections.implicitHeight
+                    contentWidth: scrollView.availableWidth
+                    flickableDirection: Flickable.VerticalFlick
 
-                    Repeater {
-                        model: root.providers
+                    ColumnLayout {
+                        id: sections
 
-                        delegate: ProviderSection {
-                            id: section
+                        width: scrollView.availableWidth
+                        spacing: 0
 
-                            required property var modelData
+                        Repeater {
+                            model: root.providers
 
-                            Layout.fillWidth: true
+                            delegate: ProviderSection {
+                                id: section
 
-                            provider: section.modelData
-                            now: root.now
-                            historyByWindow: root.historyFor(section.modelData.id)
+                                required property var modelData
+
+                                Layout.fillWidth: true
+
+                                provider: section.modelData
+                                now: root.now
+                                historyByWindow: root.historyFor(section.modelData.id)
+                            }
                         }
-                    }
 
-                    Item {
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: Kirigami.Units.largeSpacing
+                        Item {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: Kirigami.Units.largeSpacing
+                        }
                     }
                 }
             }
-        }
 
-        PlasmaExtras.PlaceholderMessage {
-            anchors.centerIn: parent
-            width: parent.width - Kirigami.Units.gridUnit * 4
+            PlasmaExtras.PlaceholderMessage {
+                anchors.centerIn: parent
+                width: parent.width - Kirigami.Units.gridUnit * 4
 
-            visible: !root.daemonRunning
-            iconName: "state-offline"
-            text: i18nc("@info:placeholder", "Token Station is not running")
-            explanation: i18nc("@info:placeholder", "Start the service to see Claude Code and Codex usage.")
+                visible: !root.daemonRunning
+                iconName: "state-offline"
+                text: i18nc("@info:placeholder", "Token Station is not running")
+                explanation: root.errorMessage.length > 0
+                    ? root.errorMessage
+                    : i18nc("@info:placeholder", "Start the service to see Claude Code and Codex usage.")
 
-            helpfulAction: Kirigami.Action {
-                // The bus name is D-Bus activatable, so any call starts the daemon.
-                icon.name: "system-run"
-                text: i18nc("@action:button", "Start")
-                onTriggered: root.refreshRequested()
+                helpfulAction: Kirigami.Action {
+                    // The bus name is D-Bus activatable, so any call starts the daemon.
+                    icon.name: "system-run"
+                    text: i18nc("@action:button", "Start")
+                    onTriggered: root.refreshRequested()
+                }
             }
-        }
 
-        PlasmaExtras.PlaceholderMessage {
-            anchors.centerIn: parent
-            width: parent.width - Kirigami.Units.gridUnit * 4
+            // The daemon answers, but something went wrong on the way to a reading.
+            PlasmaExtras.PlaceholderMessage {
+                anchors.centerIn: parent
+                width: parent.width - Kirigami.Units.gridUnit * 4
 
-            visible: root.daemonRunning && (!root.snapshot || root.loading)
-            iconName: "view-refresh"
-            text: i18nc("@info:placeholder", "Reading usage…")
+                visible: root.daemonRunning && !root.hasContent && root.errorMessage.length > 0
+                iconName: "dialog-error"
+                text: i18nc("@info:placeholder", "Usage could not be read")
+                explanation: root.errorMessage
+
+                helpfulAction: Kirigami.Action {
+                    icon.name: "view-refresh"
+                    text: i18nc("@action:button", "Try Again")
+                    onTriggered: root.refreshRequested()
+                }
+            }
+
+            PlasmaExtras.PlaceholderMessage {
+                anchors.centerIn: parent
+                width: parent.width - Kirigami.Units.gridUnit * 4
+
+                visible: root.noProviders && root.errorMessage.length === 0
+                iconName: "dialog-information"
+                text: i18nc("@info:placeholder", "No providers are turned on")
+                explanation: i18nc("@info:placeholder",
+                                   "Turn on Claude Code or Codex in the settings to see plan usage.")
+
+                helpfulAction: Kirigami.Action {
+                    // PlaceholderMessage keys its button off the action's
+                    // `enabled`, so both have to follow the condition.
+                    enabled: !!root.configureAction
+                    visible: enabled
+                    icon.name: "configure"
+                    text: i18nc("@action:button", "Configure…")
+                    onTriggered: {
+                        if (root.configureAction) {
+                            root.configureAction.trigger();
+                        }
+                    }
+                }
+            }
+
+            PlasmaExtras.PlaceholderMessage {
+                anchors.centerIn: parent
+                width: parent.width - Kirigami.Units.gridUnit * 4
+
+                visible: root.waiting
+                iconName: "view-refresh"
+                text: i18nc("@info:placeholder", "Reading usage…")
+                // A wait this long is no longer a normal start-up, so say what to do.
+                explanation: root.waitedTooLong
+                    ? i18nc("@info:placeholder",
+                            "The service has not reported any usage yet.")
+                    : ""
+
+                helpfulAction: Kirigami.Action {
+                    enabled: root.waitedTooLong
+                    visible: enabled
+                    icon.name: "view-refresh"
+                    text: i18nc("@action:button", "Try Again")
+                    onTriggered: root.refreshRequested()
+                }
+            }
+
+            // Only arms while the popup waits; it stops as soon as anything arrives.
+            Timer {
+                interval: 20000
+                running: root.waiting && !root.waitedTooLong
+                onTriggered: root.waitedTooLong = true
+            }
         }
     }
 
@@ -248,6 +328,12 @@ PlasmaExtras.Representation {
                 : ""
             textFormat: Text.PlainText
             elide: Text.ElideRight
+        }
+    }
+
+    onHasContentChanged: {
+        if (root.hasContent) {
+            root.waitedTooLong = false;
         }
     }
 

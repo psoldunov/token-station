@@ -31,7 +31,9 @@ pub fn steps(payload: &Path, dirs: &Dirs) -> anyhow::Result<Vec<Step>> {
             target: target.clone(),
         },
         Step::Note(format!(
-            "Plasma applet installed at {}; add it from the panel's \"Add Widgets…\" menu.",
+            "Plasma applet installed at {}; it joins the system tray by itself once \
+             plasmashell re-reads its plugin list. If it stays hidden, log out and back \
+             in, or tick it under System Tray Settings → Entries.",
             target.display()
         )),
     ])
@@ -79,7 +81,14 @@ mod tests {
                 target: target(&dirs),
             }
         );
-        assert!(matches!(&steps[1], Step::Note(text) if text.contains("Add Widgets")));
+        // The applet is EnabledByDefault with a notification-area category, so it
+        // appears on its own: telling the user to add a widget would be wrong.
+        let Step::Note(text) = &steps[1] else {
+            panic!("expected a note, got {:?}", steps[1])
+        };
+        assert!(text.contains("joins the system tray by itself"), "{text}");
+        assert!(text.contains("System Tray Settings"), "{text}");
+        assert!(!text.contains("Add Widgets"), "{text}");
     }
 
     #[test]

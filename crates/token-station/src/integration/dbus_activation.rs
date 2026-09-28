@@ -1,8 +1,9 @@
 //! The session-bus activation file, so any client call starts the daemon.
 //!
 //! Built from `data/dbus/dev.soldunov.TokenStation.service.in` with the install
-//! prefix replaced by the quoted binary, plus `SystemdService=` so systemd owns
-//! the process when the session has it.
+//! prefix replaced by the quoted binary. `SystemdService=` hands the process to
+//! systemd when the session has it; the template carries the line already, so it
+//! is only appended when a template without it is in use.
 
 use std::path::{Path, PathBuf};
 
@@ -21,15 +22,20 @@ pub fn service_path(dirs: &Dirs) -> PathBuf {
     dirs.data.join("dbus-1/services").join(SERVICE_FILE)
 }
 
+/// The `SystemdService=` key, written exactly once.
+const SYSTEMD_KEY: &str = "SystemdService=";
+
 /// The activation file for `exec`.
 pub fn service_text(exec: &Path) -> String {
-    let quoted = format!("\"{}\"", exec.display());
+    let quoted = crate::integration::systemd::quote_word(&exec.to_string_lossy());
     let mut text = TEMPLATE.replace(BINDIR_PLACEHOLDER, &quoted);
     if !text.ends_with('\n') {
         text.push('\n');
     }
-    // Hand the process to systemd when it is there; harmless when it is not.
-    text.push_str(&format!("SystemdService={UNIT}\n"));
+    // A second key would be read as a duplicate and the file rejected.
+    if !text.lines().any(|line| line.starts_with(SYSTEMD_KEY)) {
+        text.push_str(&format!("{SYSTEMD_KEY}{UNIT}\n"));
+    }
     text
 }
 
@@ -65,18 +71,23 @@ mod tests {
     }
 
     #[test]
-    fn the_exec_line_is_quoted_and_systemd_owns_the_process() {
+    fn the_exec_line_is_quoted_and_systemd_owns_the_process_once() {
         let text = service_text(Path::new("/apps/Token Station.AppImage"));
         assert!(
             text.contains("Exec=\"/apps/Token Station.AppImage\" daemon"),
             "{text}"
         );
-        assert!(text.contains(&format!("Name={BUS_NAME}")));
-        assert!(
-            text.ends_with("SystemdService=token-station.service\n"),
+        assert!(text.contains(&format!("Name={BUS_NAME}")), "{text}");
+        assert!(!text.contains("@bindir@"), "{text}");
+        // The template already carries the key; a second one voids the file.
+        assert_eq!(
+            text.lines()
+                .filter(|line| line.starts_with(SYSTEMD_KEY))
+                .count(),
+            1,
             "{text}"
         );
-        assert!(!text.contains("@bindir@"));
+        assert!(text.contains(&format!("{SYSTEMD_KEY}{UNIT}")), "{text}");
     }
 
     #[test]

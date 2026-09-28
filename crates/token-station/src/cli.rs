@@ -6,8 +6,11 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::integration::DesktopChoice;
 
-/// Exit code for "the bus name is already taken".
-pub const ALREADY_RUNNING_EXIT: i32 = 1;
+/// Exit code for "the bus name is already taken": `EX_TEMPFAIL`, which the unit
+/// lists in `RestartPreventExitStatus=` so systemd stops re-losing the race.
+pub const ALREADY_RUNNING_EXIT: u8 = 75;
+/// Exit code for every other failure.
+pub const FAILURE_EXIT: u8 = 1;
 
 /// Plan usage for Claude Code and Codex, in your tray.
 #[derive(Debug, Parser)]
@@ -66,6 +69,9 @@ pub struct SetupArgs {
     /// Print the plan without changing anything.
     #[arg(long)]
     pub dry_run: bool,
+    /// Replace files `setup` did not install, and shadow a packaged install.
+    #[arg(long)]
+    pub force: bool,
 }
 
 /// `--desktop`.
@@ -97,6 +103,7 @@ impl SetupArgs {
             claude_statusline: self.claude_statusline,
             payload_dir: self.payload_dir.clone(),
             dry_run: self.dry_run,
+            force: self.force,
         }
     }
 }
@@ -170,8 +177,16 @@ mod tests {
         assert_eq!(args, SetupArgs::default());
         let options = args.options();
         assert_eq!(options.desktop, DesktopChoice::Auto);
-        assert!(!options.claude_statusline && !options.dry_run);
+        assert!(!options.claude_statusline && !options.dry_run && !options.force);
         assert_eq!(options.payload_dir, None);
+    }
+
+    #[test]
+    fn force_is_opt_in() {
+        let Command::Setup(args) = parse(&["setup", "--force"]) else {
+            panic!("expected setup");
+        };
+        assert!(args.options().force);
     }
 
     #[test]

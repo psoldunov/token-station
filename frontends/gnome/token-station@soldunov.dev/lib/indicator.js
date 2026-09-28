@@ -79,6 +79,50 @@ class TokenStationIndicator extends PanelMenu.Button {
         this._percentLabel.visible = show;
         if (show)
             this._percentLabel.text = formatPercent(Math.max(...percents));
+
+        this._setAccessibleSummary(this._summary(snapshot));
+    }
+
+    /**
+     * The headline numbers as one line: "Claude Code 96 %, Codex 34 %".
+     *
+     * @param {object|null} snapshot Latest snapshot.
+     * @returns {string} Summary, or an empty string when there is nothing yet.
+     */
+    _summary(snapshot) {
+        if (snapshot === null || snapshot === undefined)
+            return _('the service is not running');
+        const providers = snapshot.providers ?? [];
+        const parts = [];
+        for (const bar of snapshot.meter?.bars ?? []) {
+            const provider = providers.find(p => p.id === bar.provider);
+            const name = provider?.name ?? bar.provider ?? '';
+            const percent = Number(bar.percent);
+            if (!Number.isFinite(percent))
+                continue;
+            parts.push(`${name} ${formatPercent(percent)}`);
+        }
+        return parts.join(', ');
+    }
+
+    /**
+     * Put the summary where a screen reader finds it: on the button's
+     * description, or folded into its name when there is no Atk object to
+     * describe (older Shell versions do not expose one from GJS).
+     *
+     * @param {string} summary Headline numbers.
+     */
+    _setAccessibleSummary(summary) {
+        const title = _('Token Station');
+        const accessible = typeof this.get_accessible === 'function'
+            ? this.get_accessible() : null;
+        if (accessible !== null && typeof accessible.set_description === 'function') {
+            this.accessible_name = title;
+            accessible.set_description(summary);
+            return;
+        }
+        this.accessible_name = summary.length > 0
+            ? `${title}: ${summary}` : title;
     }
 
     destroy() {

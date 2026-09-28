@@ -26,21 +26,26 @@ pub struct TokenCounts {
 
 impl TokenCounts {
     pub fn total(&self) -> u64 {
-        self.input + self.output + self.cache_read + self.cache_write
+        self.input
+            .saturating_add(self.output)
+            .saturating_add(self.cache_read)
+            .saturating_add(self.cache_write)
     }
 
     /// Prompt-side tokens, used to pick the long-context price tier.
     pub fn prompt_tokens(&self) -> u64 {
-        self.input + self.cache_read + self.cache_write
+        self.input
+            .saturating_add(self.cache_read)
+            .saturating_add(self.cache_write)
     }
 
     pub fn plus(&self, other: &TokenCounts) -> TokenCounts {
         TokenCounts {
-            input: self.input + other.input,
-            output: self.output + other.output,
-            cache_read: self.cache_read + other.cache_read,
-            cache_write: self.cache_write + other.cache_write,
-            reasoning: self.reasoning + other.reasoning,
+            input: self.input.saturating_add(other.input),
+            output: self.output.saturating_add(other.output),
+            cache_read: self.cache_read.saturating_add(other.cache_read),
+            cache_write: self.cache_write.saturating_add(other.cache_write),
+            reasoning: self.reasoning.saturating_add(other.reasoning),
         }
     }
 }
@@ -75,11 +80,20 @@ impl TokenLedger {
         self.events.is_empty()
     }
 
-    /// Ledger with `events` added; an event whose key is already present is ignored.
+    /// Ledger with `events` added. When an event's key is already present, the
+    /// event with the larger total token count wins: streamed content-block
+    /// lines for the same request can carry partial usage before the final
+    /// line reports the full count, and the smaller one must not shadow it.
     pub fn with_events(self, events: impl IntoIterator<Item = TokenEvent>) -> TokenLedger {
         let mut map = self.events;
         for event in events {
-            map.entry(event.dedup_key.clone()).or_insert(event);
+            map.entry(event.dedup_key.clone())
+                .and_modify(|existing| {
+                    if event.counts.total() > existing.counts.total() {
+                        *existing = event.clone();
+                    }
+                })
+                .or_insert(event);
         }
         TokenLedger { events: map }
     }
@@ -147,18 +161,22 @@ fn totals<'a>(events: impl Iterator<Item = &'a TokenEvent>, pricing: &Pricing) -
         let c = &e.counts;
         let cost = pricing.cost(&e.model, c);
         TokenTotals {
-            input: acc.input + c.input,
-            output: acc.output + c.output,
-            cache_read: acc.cache_read + c.cache_read,
-            cache_write: acc.cache_write + c.cache_write,
-            reasoning: acc.reasoning + c.reasoning,
-            total: acc.total + c.total(),
+            input: acc.input.saturating_add(c.input),
+            output: acc.output.saturating_add(c.output),
+            cache_read: acc.cache_read.saturating_add(c.cache_read),
+            cache_write: acc.cache_write.saturating_add(c.cache_write),
+            reasoning: acc.reasoning.saturating_add(c.reasoning),
+            total: acc.total.saturating_add(c.total()),
             cost_usd: match (acc.cost_usd, cost) {
                 (Some(a), Some(b)) => Some(a + b),
                 (a, b) => a.or(b),
             },
-            unpriced_tokens: acc.unpriced_tokens + if cost.is_none() { c.total() } else { 0 },
-            requests: acc.requests + 1,
+            unpriced_tokens: acc.unpriced_tokens.saturating_add(if cost.is_none() {
+                c.total()
+            } else {
+                0
+            }),
+            requests: acc.requests.saturating_add(1),
         }
     })
 }
@@ -201,14 +219,23 @@ mod tests {
     const NOON: i64 = 1_790_596_800;
 
     #[test]
-    fn dedups_by_key_keeping_first() {
-        let l = TokenLedger::new()
+    fn dedups_by_key_keeping_larger_total_regardless_of_arrival_order() {
+        // Smaller event arrives first, larger second (across two `with_events` calls).
+        let smaller_first = TokenLedger::new()
             .with_events([ev("k1", NOON, "m-a", 1, 1), ev("k1", NOON, "m-a", 99, 99)])
             .with_events([ev("k2", NOON, "m-a", 1, 0)]);
-        assert_eq!(l.len(), 2);
-        let r = l.report(DateTime::from_timestamp(NOON, 0).unwrap(), &Utc, &pricing());
-        assert_eq!(r.today.input, 2);
+        assert_eq!(smaller_first.len(), 2);
+        let r = smaller_first.report(DateTime::from_timestamp(NOON, 0).unwrap(), &Utc, &pricing());
+        assert_eq!(r.today.input, 100); // 99 (larger total) + 1, not the smaller first event
         assert_eq!(r.today.requests, 2);
+
+        // Larger event arrives first, smaller second (single `with_events` call):
+        // the smaller must not overwrite it either.
+        let larger_first = TokenLedger::new()
+            .with_events([ev("k1", NOON, "m-a", 99, 99), ev("k1", NOON, "m-a", 1, 1)]);
+        assert_eq!(larger_first.len(), 1);
+        let r2 = larger_first.report(DateTime::from_timestamp(NOON, 0).unwrap(), &Utc, &pricing());
+        assert_eq!(r2.today.input, 99);
     }
 
     #[test]

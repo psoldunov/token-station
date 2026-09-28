@@ -101,7 +101,7 @@ impl AppServerClient {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         {
-            let mut state = self.pending.lock().unwrap();
+            let mut state = self.pending.lock().unwrap_or_else(|e| e.into_inner());
             if state.closed {
                 return Err(RpcCallError::Closed);
             }
@@ -109,7 +109,11 @@ impl AppServerClient {
         }
         let line = encode_request(id, method, &params);
         if self.outgoing.send(line).is_err() {
-            self.pending.lock().unwrap().map.remove(&id);
+            self.pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .map
+                .remove(&id);
             return Err(RpcCallError::Closed);
         }
         match tokio::time::timeout(timeout, rx).await {
@@ -117,7 +121,11 @@ impl AppServerClient {
             Ok(Ok(Err(e))) => Err(RpcCallError::Remote(e.code, e.message)),
             Ok(Err(_)) => Err(RpcCallError::Closed),
             Err(_) => {
-                self.pending.lock().unwrap().map.remove(&id);
+                self.pending
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .map
+                    .remove(&id);
                 Err(RpcCallError::Timeout)
             }
         }
@@ -159,7 +167,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
     // Connection closed: dropping each sender (rather than sending through
     // it) makes every waiting `call()` see a `RecvError`, which maps to
     // `RpcCallError::Closed` instead of a synthetic remote error.
-    let mut state = pending.lock().unwrap();
+    let mut state = pending.lock().unwrap_or_else(|e| e.into_inner());
     state.closed = true;
     state.map.clear();
 }
@@ -180,7 +188,12 @@ fn dispatch_line(line: &str, reply_tx: &mpsc::UnboundedSender<String>, pending: 
 }
 
 fn reply(pending: &Pending, id: i64, outcome: Result<Value, RpcError>) {
-    if let Some(sender) = pending.lock().unwrap().map.remove(&id) {
+    if let Some(sender) = pending
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .map
+        .remove(&id)
+    {
         let _ = sender.send(outcome);
     }
 }
@@ -200,22 +213,28 @@ mod tests {
         (client, server_io)
     }
 
+    /// Read one request off `server`, then write each of `lines` in order
+    /// (each already newline-terminated is not required: this appends it).
+    async fn respond_after_request(mut server: tokio::io::DuplexStream, lines: &[&[u8]]) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut buf = [0u8; 4096];
+        let _ = server.read(&mut buf).await;
+        for line in lines {
+            server.write_all(line).await.unwrap();
+            server.write_all(b"\n").await.unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn matches_response_by_id_amid_notifications() {
-        let (client, mut server) = client_over_duplex(vec![]);
-        tokio::spawn(async move {
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            let mut buf = [0u8; 4096];
-            let _ = server.read(&mut buf).await; // the "ping" request
-            server
-                .write_all(b"{\"method\":\"account/updated\",\"params\":{}}\n")
-                .await
-                .unwrap();
-            server
-                .write_all(b"{\"id\":1,\"result\":{\"ok\":true}}\n")
-                .await
-                .unwrap();
-        });
+        let (client, server) = client_over_duplex(vec![]);
+        tokio::spawn(respond_after_request(
+            server,
+            &[
+                b"{\"method\":\"account/updated\",\"params\":{}}",
+                b"{\"id\":1,\"result\":{\"ok\":true}}",
+            ],
+        ));
         let result = client
             .call("ping", json!({}), Duration::from_secs(2))
             .await
@@ -241,18 +260,11 @@ mod tests {
 
     #[tokio::test]
     async fn maps_remote_error_response() {
-        let (client, mut server) = client_over_duplex(vec![]);
-        tokio::spawn(async move {
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            let mut buf = [0u8; 4096];
-            let _ = server.read(&mut buf).await;
-            server
-                .write_all(
-                    b"{\"id\":1,\"error\":{\"code\":-32600,\"message\":\"unknown variant\"}}\n",
-                )
-                .await
-                .unwrap();
-        });
+        let (client, server) = client_over_duplex(vec![]);
+        tokio::spawn(respond_after_request(
+            server,
+            &[b"{\"id\":1,\"error\":{\"code\":-32600,\"message\":\"unknown variant\"}}"],
+        ));
         let err = client
             .call("bogus", json!({}), Duration::from_secs(2))
             .await

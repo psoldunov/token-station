@@ -37,15 +37,29 @@
         let
           native = mkBuild pkgs;
           static = mkBuild pkgs.pkgsStatic;
-          token-station = pkgs.symlinkJoin {
-            name = "token-station-${native.daemon.package.version}";
-            paths = [
-              native.daemon.package
-              native.frontends.plasmoid
-              native.frontends.gnome-extension
-            ];
-            meta = native.daemon.package.meta;
-          };
+          # One tree holding real directories and files, not a symlink farm:
+          # KPackage refuses a plasmoid whose contents are symlinks ("Path
+          # traversal attempt detected"), so the applet would never load.
+          token-station =
+            pkgs.runCommand "token-station-${native.daemon.package.version}"
+              {
+                inherit (native.daemon.package) meta;
+                passthru = {
+                  daemon = native.daemon.package;
+                  inherit (native.frontends) plasmoid gnome-extension;
+                };
+              }
+              ''
+                mkdir -p $out
+                for tree in \
+                  ${native.daemon.package} \
+                  ${native.frontends.plasmoid} \
+                  ${native.frontends.gnome-extension}
+                do
+                  cp -rL "$tree"/. $out/
+                  chmod -R u+w $out
+                done
+              '';
         in
         {
           default = token-station;
@@ -78,6 +92,37 @@
           );
           test = craneLib.cargoTest args;
           fmt = craneLib.cargoFmt { inherit (daemon.commonArgs) src; };
+          # The applet as installed: KPackage has to find it by plugin id and
+          # hand back a real path. A symlinked package still "shows", but with
+          # an empty path, which is exactly how it fails to load in the shell.
+          plasmoid-loads =
+            pkgs.runCommand "token-station-plasmoid-loads"
+              {
+                nativeBuildInputs = [
+                  pkgs.kdePackages.kpackage
+                  pkgs.jq
+                ];
+              }
+              ''
+                share=${self.packages.${pkgs.stdenv.hostPlatform.system}.default}/share
+                package=$share/plasma/plasmoids/dev.soldunov.tokenstation
+
+                if [ -n "$(find "$package" -type l -print -quit)" ]; then
+                  echo "the installed plasmoid contains symlinks; KPackage rejects those:" >&2
+                  find "$package" -type l >&2
+                  exit 1
+                fi
+                jq -e '.KPlugin.Id == "dev.soldunov.tokenstation"' "$package/metadata.json" > /dev/null
+
+                export HOME=$TMPDIR
+                export XDG_DATA_DIRS=$share
+                export QT_QPA_PLATFORM=offscreen
+                kpackagetool6 --type Plasma/Applet --show dev.soldunov.tokenstation | tee info.txt
+                grep -q "Plugin     : dev.soldunov.tokenstation" info.txt
+                # An empty path is KPackage having refused the package contents.
+                grep -qE "^  Path       : .*/dev.soldunov.tokenstation/?$" info.txt
+                touch $out
+              '';
           # Boots GNOME in a VM, enables the extension against a fixture daemon,
           # asserts it loaded cleanly and renders the menu (needs KVM).
           gnome-vm = import ./nix/tests/gnome.nix {

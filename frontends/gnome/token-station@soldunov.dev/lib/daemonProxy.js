@@ -7,6 +7,7 @@
 // interface `dev.soldunov.TokenStation1`.
 
 import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
 
 export const BUS_NAME = 'dev.soldunov.TokenStation';
 export const OBJECT_PATH = '/dev/soldunov/TokenStation';
@@ -134,33 +135,83 @@ export class DaemonProxy extends Emitter {
             () => this._onNameAppeared(),
             () => this._onNameVanished());
 
+        await this._ensureProxy();
+        // Building the proxy deliberately does not auto-start the daemon, so
+        // ask the bus to activate it when nothing owns the name yet.
+        if (this._proxy !== null && this._proxy.g_name_owner === null)
+            await this._activate();
+    }
+
+    /**
+     * Build the proxy if there is none. Never throws: a daemon that cannot be
+     * reached must not take the panel down with it.
+     *
+     * @returns {Promise<boolean>} Whether a proxy exists afterwards.
+     */
+    async _ensureProxy() {
+        if (this._destroyed)
+            return false;
+        if (this._proxy !== null)
+            return true;
+
         const Wrapper = Gio.DBusProxy.makeProxyWrapper(INTERFACE_XML);
+        let proxy;
         try {
-            this._proxy = await new Promise((resolve, reject) => {
+            proxy = await new Promise((resolve, reject) => {
                 new Wrapper(
                     Gio.DBus.session, BUS_NAME, OBJECT_PATH,
-                    (proxy, error) => error ? reject(error) : resolve(proxy),
+                    (built, error) => error ? reject(error) : resolve(built),
                     null,
-                    // The bus name is activatable, so building the proxy also
-                    // starts the daemon when it is not running yet.
-                    Gio.DBusProxyFlags.NONE);
+                    // Activation is requested explicitly instead, so that a
+                    // daemon that fails to start leaves a usable proxy behind
+                    // rather than none at all.
+                    Gio.DBusProxyFlags.DO_NOT_AUTO_START);
             });
         } catch (e) {
             console.error(e, 'Token Station: cannot reach the daemon');
-            return;
+            return false;
         }
-        if (this._destroyed) {
-            this._proxy = null;
-            return;
-        }
+        if (this._destroyed)
+            return false;
 
+        this._proxy = proxy;
         this._propertiesChangedId = this._proxy.connect(
             'g-properties-changed', () => this._readSnapshot());
         this._readSnapshot();
+        return true;
+    }
+
+    /** Ask the bus to start the daemon from its D-Bus service file. */
+    async _activate() {
+        try {
+            await Gio.DBus.session.call(
+                'org.freedesktop.DBus', '/org/freedesktop/DBus',
+                'org.freedesktop.DBus', 'StartServiceByName',
+                new GLib.Variant('(su)', [BUS_NAME, 0]),
+                null, Gio.DBusCallFlags.NONE, -1, null);
+        } catch (e) {
+            console.error(e, 'Token Station: cannot start the daemon');
+        }
+    }
+
+    /**
+     * Retry everything the first attempt may have missed: a proxy that never
+     * got built, and a daemon that is not running.
+     */
+    async retry() {
+        await this._ensureProxy();
+        if (this._proxy !== null && this._proxy.g_name_owner === null)
+            await this._activate();
     }
 
     _onNameAppeared() {
-        // The proxy caches properties; re-read once the owner is known.
+        // A proxy that failed to build while the daemon was down gets its
+        // second chance here; otherwise just re-read the cached properties.
+        if (this._proxy === null) {
+            this._ensureProxy().catch(e =>
+                console.error(e, 'Token Station: cannot reach the daemon'));
+            return;
+        }
         this._readSnapshot();
     }
 
@@ -199,8 +250,9 @@ export class DaemonProxy extends Emitter {
         });
     }
 
-    /** Ask every provider to refresh now. */
+    /** Ask every provider to refresh now, starting the daemon if it is down. */
     async refresh() {
+        await this.retry();
         await this._call('RefreshRemote', []);
     }
 

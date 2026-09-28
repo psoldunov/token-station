@@ -13,6 +13,9 @@ use crate::daemon::state::Daemon;
 pub const TICK: Duration = Duration::from_secs(60);
 /// Never sleep longer than this, so config changes take effect promptly.
 pub const MAX_SLEEP: Duration = Duration::from_secs(900);
+/// How often the pricing cache is checked; it is good for a day, so this is only
+/// about noticing that the day has passed on a daemon that never restarts.
+pub const PRICING_CHECK: Duration = Duration::from_secs(60 * 60);
 
 /// Broadcast shutdown to every loop.
 pub type Shutdown = watch::Receiver<bool>;
@@ -64,6 +67,16 @@ async fn tick_loop(daemon: Arc<Daemon>, mut shutdown: Shutdown) {
     }
 }
 
+/// Re-download the price table once a day, for a daemon that runs for weeks.
+async fn pricing_loop(daemon: Arc<Daemon>, mut shutdown: Shutdown) {
+    loop {
+        if !sleep_or_stop(PRICING_CHECK, &mut shutdown).await {
+            return;
+        }
+        daemon.refresh_pricing().await;
+    }
+}
+
 /// Start every loop; the handles finish once `shutdown` flips.
 pub fn spawn_all(daemon: &Arc<Daemon>, shutdown: &Shutdown) -> Vec<JoinHandle<()>> {
     let mut handles: Vec<JoinHandle<()>> = ProviderId::ALL
@@ -75,6 +88,10 @@ pub fn spawn_all(daemon: &Arc<Daemon>, shutdown: &Shutdown) -> Vec<JoinHandle<()
         shutdown.clone(),
     )));
     handles.push(tokio::spawn(tick_loop(
+        Arc::clone(daemon),
+        shutdown.clone(),
+    )));
+    handles.push(tokio::spawn(pricing_loop(
         Arc::clone(daemon),
         shutdown.clone(),
     )));

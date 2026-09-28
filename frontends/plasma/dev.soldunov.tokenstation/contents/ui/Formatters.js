@@ -2,64 +2,36 @@
     SPDX-FileCopyrightText: 2026 Philipp Soldunov <philipp@theswisscheese.com>
     SPDX-License-Identifier: MIT
 
-    Pure formatting helpers shared by every representation.
+    Formatting helpers shared by every representation.
 
-    This is a `.pragma library`, so it has no access to the QML context and cannot
-    call i18n() itself. The applet calls setLabels() once at start-up with the
-    translated unit strings; the English fallbacks below keep the offscreen render
-    harness (which has no KLocalizedContext) working unchanged.
+    Deliberately not a `.pragma library`: a shared library is evaluated outside
+    any QML context and could not call i18n(), while this file is evaluated in
+    the context of the component importing it, so the strings below are the
+    session's own and never depend on start-up ordering. Numbers go through
+    Qt.locale() for the same reason.
 */
-.pragma library
-
-var DEFAULT_LABELS = {
-    day: "d",
-    hour: "h",
-    minute: "min",
-    second: "s",
-    thousand: "K",
-    million: "M",
-    billion: "B",
-    // %1 is the already-formatted number.
-    percent: "%1 %",
-    now: "now",
-    justNow: "just now",
-    // %1 is an already-formatted duration such as "2 h 14 min".
-    ago: "%1 ago",
-    resetsIn: "resets in %1",
-    unknown: "—"
-};
-
-var labels = DEFAULT_LABELS;
-
-/*! Install translated unit strings. Missing keys keep their English default. */
-function setLabels(overrides) {
-    var merged = {};
-    for (var key in DEFAULT_LABELS) {
-        merged[key] = DEFAULT_LABELS[key];
-    }
-    for (var override in overrides) {
-        if (overrides[override] !== undefined && overrides[override] !== null) {
-            merged[override] = overrides[override];
-        }
-    }
-    labels = merged;
-}
-
-function fill(pattern, value) {
-    return String(pattern).replace("%1", value);
-}
 
 function isNumber(value) {
     return typeof value === "number" && isFinite(value);
 }
 
-/*! "34 %" for 34.0; the unknown placeholder for null/undefined. */
+/*! The em dash Breeze uses wherever a reading is missing. */
+function unknown() {
+    return i18nc("@item:intext No value available", "—");
+}
+
+/*! A number with a fixed number of decimals, in the session's locale. */
+function number(value, decimals) {
+    return Number(value).toLocaleString(Qt.locale(), "f", decimals);
+}
+
+/*! "34%" for 34.0; the unknown placeholder for null/undefined. */
 function percent(value, decimals) {
     if (!isNumber(value)) {
-        return labels.unknown;
+        return unknown();
     }
     var digits = isNumber(decimals) ? decimals : 0;
-    return fill(labels.percent, value.toFixed(digits));
+    return i18nc("@item:intext A percentage, %1 is the number", "%1%", number(value, digits));
 }
 
 /*!
@@ -68,68 +40,79 @@ function percent(value, decimals) {
 */
 function duration(seconds) {
     if (!isNumber(seconds) || seconds < 0) {
-        return labels.unknown;
+        return unknown();
     }
     var total = Math.round(seconds);
     if (total < 60) {
-        return total + " " + labels.second;
+        return i18ncp("@item:intext Duration in seconds", "%1 s", "%1 s", total);
     }
     var minutes = Math.floor(total / 60);
     if (minutes < 60) {
-        return minutes + " " + labels.minute;
+        return i18ncp("@item:intext Duration in minutes", "%1 min", "%1 min", minutes);
     }
     var hours = Math.floor(minutes / 60);
     if (hours < 24) {
         var restMinutes = minutes % 60;
-        var hourPart = hours + " " + labels.hour;
-        return restMinutes > 0 ? hourPart + " " + restMinutes + " " + labels.minute : hourPart;
+        if (restMinutes > 0) {
+            return i18nc("@item:intext Duration in hours and minutes, %1 hours and %2 minutes",
+                         "%1 h %2 min", hours, restMinutes);
+        }
+        return i18ncp("@item:intext Duration in hours", "%1 h", "%1 h", hours);
     }
     var days = Math.floor(hours / 24);
     var restHours = hours % 24;
-    var dayPart = days + " " + labels.day;
-    return restHours > 0 ? dayPart + " " + restHours + " " + labels.hour : dayPart;
+    if (restHours > 0) {
+        return i18nc("@item:intext Duration in days and hours, %1 days and %2 hours",
+                     "%1 d %2 h", days, restHours);
+    }
+    return i18ncp("@item:intext Duration in days", "%1 d", "%1 d", days);
 }
 
-/*! "resets in 2 h 14 min", or "resets in now" collapsed to just "now". */
+/*! "resets in 2 h 14 min", or just "now" once the window is due. */
 function resetsIn(resetsAt, nowSeconds) {
     if (!isNumber(resetsAt)) {
         return "";
     }
     var remaining = resetsAt - nowSeconds;
     if (remaining <= 0) {
-        return labels.now;
+        return i18nc("@item:intext A window that resets right now", "now");
     }
-    return fill(labels.resetsIn, duration(remaining));
+    return i18nc("@item:intext When a usage window resets, %1 is a duration",
+                 "resets in %1", duration(remaining));
 }
 
 /*! "1 min ago" for a Unix-second timestamp in the past. */
 function timeAgo(timestamp, nowSeconds) {
     if (!isNumber(timestamp)) {
-        return labels.unknown;
+        return unknown();
     }
     var elapsed = nowSeconds - timestamp;
     if (elapsed < 45) {
-        return labels.justNow;
+        return i18nc("@item:intext Something that happened seconds ago", "just now");
     }
-    return fill(labels.ago, duration(elapsed));
+    return i18nc("@item:intext How long ago something happened, %1 is a duration",
+                 "%1 ago", duration(elapsed));
 }
 
-/*! "43.3 M", "680.4 K", "412". */
+/*! "43.3 M", "680.4 K", "412", each written the way the locale writes numbers. */
 function tokens(value) {
     if (!isNumber(value)) {
-        return labels.unknown;
+        return unknown();
     }
     var abs = Math.abs(value);
     if (abs < 1000) {
-        return String(Math.round(value));
+        return number(Math.round(value), 0);
     }
     if (abs < 1e6) {
-        return (value / 1e3).toFixed(1) + " " + labels.thousand;
+        return i18nc("@item:intext Token count in thousands, %1 is the number",
+                     "%1 K", number(value / 1e3, 1));
     }
     if (abs < 1e9) {
-        return (value / 1e6).toFixed(1) + " " + labels.million;
+        return i18nc("@item:intext Token count in millions, %1 is the number",
+                     "%1 M", number(value / 1e6, 1));
     }
-    return (value / 1e9).toFixed(2) + " " + labels.billion;
+    return i18nc("@item:intext Token count in billions, %1 is the number",
+                 "%1 B", number(value / 1e9, 2));
 }
 
 var CURRENCY_SYMBOLS = {
@@ -139,15 +122,23 @@ var CURRENCY_SYMBOLS = {
     JPY: "¥"
 };
 
-/*! "$31.42"; unknown currency codes fall back to "CHF 31.42". */
+/*!
+   Money in the session's locale: "$31.42" in English, "31,42 $" in French.
+   Unknown currency codes are written out ("CHF 31.42").
+*/
 function currency(amount, code) {
     if (!isNumber(amount)) {
-        return labels.unknown;
+        return unknown();
     }
     var upper = String(code || "USD").toUpperCase();
-    var symbol = CURRENCY_SYMBOLS[upper];
-    var digits = amount !== 0 && Math.abs(amount) < 0.01 ? 4 : 2;
-    return symbol ? symbol + amount.toFixed(digits) : upper + " " + amount.toFixed(digits);
+    var symbol = CURRENCY_SYMBOLS[upper] ? CURRENCY_SYMBOLS[upper] : upper;
+    // Sub-cent amounts say nothing at two decimals, and no locale's currency
+    // format carries four, so those are written as a plain number plus symbol.
+    if (amount !== 0 && Math.abs(amount) < 0.01) {
+        return i18nc("@item:intext A tiny amount of money, %1 is the currency, %2 the number",
+                     "%1 %2", symbol, number(amount, 4));
+    }
+    return Number(amount).toLocaleCurrencyString(Qt.locale(), symbol);
 }
 
 /*! Short label for a snapshot timestamp, used by the popup footer. */

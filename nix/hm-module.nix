@@ -57,8 +57,9 @@ in
       default = false;
       description = ''
         Enable the GNOME Shell extension by adding `${gnomeUuid}` to
-        `org/gnome/shell/enabled-extensions` (with `mkDefault`: if you set that list
-        yourself, include the UUID there).
+        `org/gnome/shell/enabled-extensions`. home-manager concatenates GVariant
+        array definitions, so your own `enabled-extensions` list is kept and the
+        UUID is appended to it.
       '';
     };
 
@@ -69,6 +70,10 @@ in
         description = ''
           Point Claude Code's statusLine at `token-station statusline` so live plan usage
           reaches the daemon while Claude Code runs. Requires `programs.claude-code`.
+
+          This replaces an existing `programs.claude-code.settings.statusLine`
+          definition (it is set at `lib.mkOverride 90`); put the command you had
+          in {option}`claudeStatusline.wrap` to keep its output.
         '';
       };
       wrap = lib.mkOption {
@@ -115,15 +120,23 @@ in
           Install.WantedBy = [ "graphical-session.target" ];
         };
 
+        # A plain definition: home-manager's GVariant arrays concatenate, so a
+        # user-defined enabled-extensions list keeps its entries and gains this one.
         dconf.settings = lib.mkIf cfg.gnome.enable {
-          "org/gnome/shell".enabled-extensions = lib.mkDefault [ gnomeUuid ];
+          "org/gnome/shell".enabled-extensions = [ gnomeUuid ];
         };
       }
       (lib.optionalAttrs (options.programs ? claude-code) {
-        programs.claude-code.settings.statusLine = lib.mkIf cfg.claudeStatusline.enable {
-          type = "command";
-          command = statuslineCommand;
-        };
+        # Turning `claudeStatusline.enable` on is an explicit request to replace
+        # whatever statusLine is configured, so it outranks a normal definition
+        # (`wrap` keeps the previous command rendering). A user who wants the
+        # opposite can still win with `lib.mkForce`.
+        programs.claude-code.settings.statusLine = lib.mkIf cfg.claudeStatusline.enable (
+          lib.mkOverride 90 {
+            type = "command";
+            command = statuslineCommand;
+          }
+        );
       })
     ]
   );

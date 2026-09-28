@@ -38,6 +38,8 @@ jobs:
       - name: Build AppImage
         run: nix build -L .#appimage
       - name: Smoke-test AppImage on a non-Nix system
+        # bash with `-o pipefail`, so a failing command inside a pipe fails the step.
+        shell: bash
         run: |
           ./result/TokenStation-x86_64.AppImage --appimage-extract-and-run --help
           ./result/TokenStation-x86_64.AppImage --appimage-extract-and-run status --json | head -c 400

@@ -1,12 +1,19 @@
 //! HTTP fallback against the ChatGPT usage endpoint, used only when the
 //! app-server is unavailable or too old to support it.
 
+use std::time::Duration;
+
 use secrecy::ExposeSecret;
 use serde::Deserialize;
 use ts_core::snapshot::{Credits, UsageWindow};
 
 use crate::auth::AuthTokens;
 use crate::windows::{plan_label, window_kind, window_label};
+
+/// Bounds on the fallback HTTP call so a stalled/unreachable endpoint can
+/// never hang a caller holding a lock (e.g. `refresh_limits`'s session lock).
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, thiserror::Error)]
 pub enum HttpFallbackError {
@@ -37,6 +44,8 @@ pub struct HttpFallback {
 impl HttpFallback {
     pub fn new(base_url: String, user_agent: String) -> HttpFallback {
         let client = reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .connect_timeout(CONNECT_TIMEOUT)
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         HttpFallback {
@@ -151,7 +160,10 @@ fn map_window(suffix: &str, window: &WindowDto, now: i64) -> UsageWindow {
         .and_then(ts_core::time::parse_timestamp)
         .or_else(|| window.reset_after_seconds.map(|s| now + s));
     UsageWindow {
-        id: format!("http:{suffix}"),
+        // Same id scheme as the app-server/rollout paths (`codex:primary`,
+        // `codex:secondary`) so alert state and history don't treat a
+        // fallback-sourced window as a brand-new one and re-fire alerts.
+        id: format!("codex:{suffix}"),
         label: window_label("codex", None, None, minutes),
         kind: window_kind("codex", minutes),
         used_percent: window.used_percent,
@@ -191,9 +203,9 @@ mod tests {
         let mapping = parse_usage_body(body, 1_000).unwrap();
         assert_eq!(mapping.plan, Some("Pro".to_string()));
         assert_eq!(mapping.windows.len(), 2);
-        assert_eq!(mapping.windows[0].id, "http:primary");
+        assert_eq!(mapping.windows[0].id, "codex:primary");
         assert_eq!(mapping.windows[0].resets_at, Some(4_600));
-        assert_eq!(mapping.windows[1].id, "http:secondary");
+        assert_eq!(mapping.windows[1].id, "codex:secondary");
         assert_eq!(mapping.credits.unwrap().detail, Some("Balance: 7".into()));
     }
 
@@ -241,5 +253,25 @@ mod tests {
         let fallback = HttpFallback::new(server.uri(), "token-station/test".into());
         let err = fallback.fetch_usage(&tokens(), 0).await.unwrap_err();
         assert!(matches!(err, HttpFallbackError::Unauthorized));
+    }
+
+    #[tokio::test]
+    async fn fetch_usage_times_out_instead_of_hanging_forever() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/backend-api/wham/usage"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(60)))
+            .mount(&server)
+            .await;
+
+        let fallback = HttpFallback::new(server.uri(), "token-station/test".into());
+        // The client's own 20s request timeout must fire well before this
+        // outer guard, proving `fetch_usage` gives up instead of hanging
+        // until the mock's 60s delay elapses.
+        let err = tokio::time::timeout(Duration::from_secs(25), fallback.fetch_usage(&tokens(), 0))
+            .await
+            .expect("fetch_usage must give up on its own before the outer timeout")
+            .unwrap_err();
+        assert!(matches!(err, HttpFallbackError::Request(_)));
     }
 }

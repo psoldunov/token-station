@@ -190,7 +190,9 @@ pub fn render(size: u32, specs: &[BarSpec], scheme: ColorScheme) -> Pixmap {
                 }
                 let pixel = blend(colors, ring / per_pixel, fill / per_pixel);
                 let at = ((py * size + px) * 4) as usize;
-                argb[at..at + 4].copy_from_slice(&[pixel.a, pixel.r, pixel.g, pixel.b]);
+                if let Some(slot) = argb.get_mut(at..at + 4) {
+                    slot.copy_from_slice(&[pixel.a, pixel.r, pixel.g, pixel.b]);
+                }
             }
         }
     }

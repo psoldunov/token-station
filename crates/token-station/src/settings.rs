@@ -4,7 +4,11 @@ use std::path::Path;
 
 use ts_core::config::{Config, ConfigError};
 
-use crate::atomic::write_atomic;
+use crate::atomic::{Unwritable, check_replaceable, write_atomic};
+
+/// What `SetSettings` reports when `config.toml` is not ours to rewrite.
+pub const MANAGED_DECLARATIVELY: &str =
+    "config.toml is managed declaratively (e.g. by Nix); change it there";
 
 /// Which parts of the daemon a config replacement invalidates.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -58,7 +62,14 @@ pub fn parse_settings(json: &str) -> Result<Config, Vec<String>> {
 }
 
 /// Write `config` to `path` as TOML, atomically.
+///
+/// A symlink or a read-only file is somebody else's to change: renaming over it
+/// would replace a `/nix/store` link and the next rebuild would undo the change
+/// anyway, so it is refused instead.
 pub fn persist(config: &Config, path: &Path) -> Result<(), String> {
+    if let Err(Unwritable::Symlink | Unwritable::ReadOnly) = check_replaceable(path) {
+        return Err(MANAGED_DECLARATIVELY.into());
+    }
     let text = config.to_toml().map_err(|e| e.to_string())?;
     write_atomic(path, text.as_bytes()).map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
@@ -138,6 +149,48 @@ mod tests {
         config.alerts.warning_percent = 70.0;
         persist(&config, &path).unwrap();
         assert_eq!(Config::load(&path).unwrap(), config);
+    }
+
+    #[test]
+    fn a_config_somebody_else_manages_is_refused_rather_than_replaced() {
+        use std::os::unix::fs::PermissionsExt;
+        const MANAGED: &str = "# managed\n";
+        let dir = tempfile::tempdir().unwrap();
+
+        // What home-manager leaves behind: a symlink into the store.
+        let target = dir.path().join("store-config.toml");
+        std::fs::write(&target, MANAGED).unwrap();
+        let link = dir.path().join("linked.toml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        // And what a plain read-only copy looks like.
+        let read_only = dir.path().join("read-only.toml");
+        std::fs::write(&read_only, MANAGED).unwrap();
+        std::fs::set_permissions(&read_only, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        for path in [&link, &read_only] {
+            assert_eq!(
+                persist(&Config::default(), path).unwrap_err(),
+                MANAGED_DECLARATIVELY,
+                "{}",
+                path.display()
+            );
+            assert_eq!(std::fs::read_to_string(path).unwrap(), MANAGED);
+        }
+        assert!(
+            std::fs::symlink_metadata(&link).unwrap().is_symlink(),
+            "the link itself was not replaced either"
+        );
+    }
+
+    #[test]
+    fn a_write_failure_is_reported_rather_than_swallowed() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory where the file should be: the rename cannot succeed.
+        let path = dir.path().join("config.toml");
+        std::fs::create_dir(&path).unwrap();
+        let error = persist(&Config::default(), &path).unwrap_err();
+        assert!(error.contains("cannot write"), "{error}");
     }
 
     #[test]

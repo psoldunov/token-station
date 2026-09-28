@@ -15,6 +15,7 @@ use anyhow::Context;
 use ksni::{Category, Status, ToolTip, TrayMethods};
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use ts_core::{Level, ProviderState, Snapshot};
+use zbus::fdo::{RequestNameFlags, RequestNameReply};
 
 use crate::clock::{Clock, system_clock};
 use crate::tray::client::Update;
@@ -23,6 +24,13 @@ use crate::tray::palette::ColorScheme;
 
 /// Item id, stable across sessions.
 pub const ITEM_ID: &str = "token-station";
+/// Name the tray owns, so a second one exits instead of stacking up a
+/// second icon: `setup` starts a tray and the autostart entry starts one too.
+pub const TRAY_BUS_NAME: &str = "dev.soldunov.TokenStation.Tray";
+/// Object `uninstall` calls to ask the tray to quit.
+pub const TRAY_OBJECT_PATH: &str = "/dev/soldunov/TokenStation/Tray";
+/// Its interface; internal, and not part of `docs/dbus-api.md`.
+pub const TRAY_INTERFACE_NAME: &str = "dev.soldunov.TokenStation.Tray1";
 /// How often the countdowns in the tooltip and the menu are refreshed.
 const TICK: Duration = Duration::from_secs(60);
 
@@ -192,20 +200,60 @@ impl ksni::Tray for TokenStationTray {
     }
 }
 
+/// The tray's own tiny interface: one method, so `uninstall` can stop it.
+pub struct TrayControl {
+    actions: UnboundedSender<Action>,
+}
+
+#[zbus::interface(name = "dev.soldunov.TokenStation.Tray1")]
+impl TrayControl {
+    /// Leave the run loop, exactly as the "Quit" menu item does.
+    fn quit(&self) {
+        let _ = self.actions.send(Action::Quit);
+    }
+}
+
+/// Serve the control object, then take the name. `false` when a tray already has it.
+async fn claim_tray_name(
+    connection: &zbus::Connection,
+    actions: UnboundedSender<Action>,
+) -> anyhow::Result<bool> {
+    connection
+        .object_server()
+        .at(TRAY_OBJECT_PATH, TrayControl { actions })
+        .await?;
+    let reply = connection
+        .request_name_with_flags(TRAY_BUS_NAME, RequestNameFlags::DoNotQueue.into())
+        .await;
+    match reply {
+        Ok(RequestNameReply::PrimaryOwner) => Ok(true),
+        Ok(_) | Err(zbus::Error::NameTaken) => Ok(false),
+        Err(error) => Err(anyhow::Error::new(error).context("cannot request the tray's bus name")),
+    }
+}
+
 /// Run the tray until "Quit" or a fatal bus error.
 pub async fn run() -> anyhow::Result<()> {
     let connection = zbus::Connection::session()
         .await
         .context("no session bus; the tray needs a desktop session")?;
-    let scheme = portal::read_scheme(&connection).await.unwrap_or_default();
-    let snapshot = client::initial_snapshot(&connection).await;
 
     let (updates, mut inbox) = unbounded_channel();
     let (actions, mut commands) = unbounded_channel();
+    if !claim_tray_name(&connection, actions.clone()).await? {
+        tracing::info!("a Token Station tray is already running; leaving it to it");
+        return Ok(());
+    }
+
+    let scheme = portal::read_scheme(&connection).await.unwrap_or_default();
+    let snapshot = client::initial_snapshot(&connection).await;
+    // The watcher may register after us — an autostarted tray usually beats the
+    // panel to the bus — so do not treat its absence as fatal.
     let handle = TokenStationTray::new(snapshot, scheme, actions, system_clock())
+        .assume_sni_available(true)
         .spawn()
         .await
-        .context("no StatusNotifierItem host on this session bus")?;
+        .context("cannot publish the StatusNotifierItem on this session bus")?;
 
     tokio::spawn(client::watch_daemon(connection.clone(), updates.clone()));
     tokio::spawn(client::watch_scheme(connection.clone(), updates));

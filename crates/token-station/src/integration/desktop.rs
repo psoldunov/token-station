@@ -7,8 +7,8 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::integration::Dirs;
 use crate::integration::step::Step;
+use crate::integration::{Dirs, quoting};
 
 /// Application entry, shown by launchers.
 pub const ENTRY: &str = "dev.soldunov.TokenStation.desktop";
@@ -19,6 +19,12 @@ const ENTRY_TEMPLATE: &str =
     include_str!("../../../../data/applications/dev.soldunov.TokenStation.desktop");
 const TRAY_TEMPLATE: &str =
     include_str!("../../../../data/applications/dev.soldunov.TokenStation.Tray.desktop");
+
+/// Base names of the installed icons, which is what `uninstall` matches on.
+pub const ICON_FILES: [&str; 2] = [
+    "dev.soldunov.TokenStation.svg",
+    "dev.soldunov.TokenStation-symbolic.svg",
+];
 
 /// Icons, as (path under `icons/`, contents).
 const ICONS: [(&str, &str); 2] = [
@@ -67,9 +73,18 @@ pub fn detect(current: Option<&str>) -> Desktop {
         .unwrap_or_default()
 }
 
+/// Quote one `Exec=` argument the way the Desktop Entry spec asks for.
+///
+/// Inside the double quotes a backslash, a double quote, a backtick and a dollar
+/// sign each need an extra backslash, and a literal per-cent sign is written `%%`
+/// so it is not read as a field code.
+pub fn quote_exec(value: &str) -> String {
+    quoting::quoted(value, &quoting::DESKTOP_ESCAPED)
+}
+
 /// Replace the `Exec=` line with the real binary and `args`.
 pub fn rewrite_exec(contents: &str, exec: &Path, args: &str) -> String {
-    let replacement = format!("Exec=\"{}\" {args}", exec.display());
+    let replacement = format!("Exec={} {args}", quote_exec(&exec.to_string_lossy()));
     let mut out: Vec<String> = contents
         .lines()
         .map(|line| {
@@ -164,6 +179,27 @@ mod tests {
     }
 
     #[test]
+    fn exec_quoting_follows_the_desktop_entry_spec() {
+        assert_eq!(quote_exec("/opt/Token Station"), "\"/opt/Token Station\"");
+        assert_eq!(quote_exec(r#"/opt/we"ird`$\x"#), r#""/opt/we\"ird\`\$\\x""#);
+        // A per-cent sign would otherwise be read as a field code.
+        assert_eq!(quote_exec("/opt/100%.AppImage"), "\"/opt/100%%.AppImage\"");
+    }
+
+    #[test]
+    fn an_awkward_path_is_escaped_in_the_written_entry() {
+        let rewritten = rewrite_exec(
+            ENTRY_TEMPLATE,
+            Path::new(r#"/apps/Token "Station" 100%.AppImage"#),
+            "tray",
+        );
+        assert!(
+            rewritten.contains(r#"Exec="/apps/Token \"Station\" 100%%.AppImage" tray"#),
+            "{rewritten}"
+        );
+    }
+
+    #[test]
     fn an_entry_without_an_exec_line_gets_one() {
         let rewritten = rewrite_exec("[Desktop Entry]\nType=Application", Path::new("/x"), "tray");
         assert_eq!(
@@ -190,6 +226,15 @@ mod tests {
                 "/da/icons/hicolor/symbolic/apps/dev.soldunov.TokenStation-symbolic.svg",
             ]
         );
+    }
+
+    #[test]
+    fn every_installed_icon_is_one_of_the_known_names() {
+        for (relative, _) in ICONS {
+            let name = Path::new(relative).file_name().unwrap().to_str().unwrap();
+            assert!(ICON_FILES.contains(&name), "{relative} is not listed");
+        }
+        assert_eq!(ICONS.len(), ICON_FILES.len());
     }
 
     #[test]

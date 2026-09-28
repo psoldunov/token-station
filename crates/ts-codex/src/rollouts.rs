@@ -5,8 +5,8 @@
 //! `{"timestamp","type","payload"}`; only `turn_context` (current model) and
 //! `event_msg` with `payload.type == "token_count"` (usage) matter here.
 
-use std::collections::HashMap;
-use std::io::{Read, Seek, SeekFrom};
+use std::collections::{HashMap, HashSet};
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -27,12 +27,17 @@ pub struct ScanOutput {
     pub latest_rate_limits: Option<(i64, RateLimitSnapshotDto)>,
 }
 
-/// Per-file read state, keyed by `(dev, inode)` so a rename doesn't lose the cursor.
+/// Per-file read state, keyed by `(dev, ino)`: a session file moved from
+/// `sessions/**` to `archived_sessions/` keeps the same inode, so keying on
+/// the path (which changes) would otherwise make the move look like a brand
+/// new, unscanned file and double-count its events.
 #[derive(Debug, Clone, Default)]
 struct FileState {
-    dev: u64,
-    ino: u64,
     offset: u64,
+    /// The file's name at the time `offset` was recorded; used to build a
+    /// dedup key that survives the sessions/archived_sessions move (the full
+    /// path does not).
+    file_name: String,
     last_seen_total: Option<i64>,
     model: Option<String>,
 }
@@ -41,7 +46,7 @@ struct FileState {
 /// `scan` inside `spawn_blocking`.
 #[derive(Debug)]
 pub struct RolloutScanner {
-    files: HashMap<PathBuf, FileState>,
+    files: HashMap<(u64, u64), FileState>,
     first_scan: bool,
 }
 
@@ -59,7 +64,9 @@ impl RolloutScanner {
         }
     }
 
-    /// Scan every rollout file under `homes`, returning newly discovered events.
+    /// Scan every rollout file under `homes`, returning newly discovered
+    /// events. State for inodes not seen in this pass (files removed since
+    /// the last scan) is pruned so it never grows unbounded.
     pub fn scan(&mut self, homes: &[PathBuf], now: i64) -> ScanOutput {
         let mut out = ScanOutput::default();
         let min_mtime = if self.first_scan {
@@ -67,65 +74,82 @@ impl RolloutScanner {
         } else {
             None
         };
+        let mut seen: HashSet<(u64, u64)> = HashSet::new();
 
         for home in homes {
             for path in discover_files(home) {
+                let Ok(metadata) = std::fs::metadata(&path) else {
+                    continue;
+                };
+                let key = (metadata.dev(), metadata.ino());
+                seen.insert(key);
                 if let Some(min) = min_mtime {
-                    if !self.files.contains_key(&path) && !is_recent(&path, min) {
+                    if !self.files.contains_key(&key) && !is_recent(&path, min) {
                         continue;
                     }
                 }
-                self.scan_file(&path, now, &mut out);
+                self.scan_file(&path, key, metadata.len(), now, &mut out);
             }
         }
         self.first_scan = false;
+        self.files.retain(|key, _| seen.contains(key));
         out
     }
 
-    fn scan_file(&mut self, path: &Path, now: i64, out: &mut ScanOutput) {
-        let Ok(file) = std::fs::File::open(path) else {
-            return;
-        };
-        let Ok(metadata) = file.metadata() else {
-            return;
-        };
-        let (dev, ino) = (metadata.dev(), metadata.ino());
-        let len = metadata.len();
+    fn scan_file(
+        &mut self,
+        path: &Path,
+        key: (u64, u64),
+        len: u64,
+        now: i64,
+        out: &mut ScanOutput,
+    ) {
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string();
 
-        let state = self.files.entry(path.to_path_buf()).or_default();
-        let truncated =
-            state.dev != 0 && (state.dev != dev || state.ino != ino || len < state.offset);
+        let state = self.files.entry(key).or_default();
+        let truncated = !state.file_name.is_empty() && len < state.offset;
         if truncated {
             *state = FileState::default();
         }
-        state.dev = dev;
-        state.ino = ino;
+        state.file_name = file_name;
         if len <= state.offset {
             return;
         }
 
+        let Ok(file) = std::fs::File::open(path) else {
+            return;
+        };
         let mut file = file;
         if file.seek(SeekFrom::Start(state.offset)).is_err() {
             return;
         }
-        let mut buf = Vec::new();
-        if file.read_to_end(&mut buf).is_err() {
-            return;
-        }
-
-        let mut consumed = 0usize;
-        for raw_line in buf.split_inclusive(|&b| b == b'\n') {
-            if !raw_line.ends_with(b"\n") {
+        let mut reader = BufReader::new(file);
+        let mut consumed = 0u64;
+        loop {
+            let mut raw_line = Vec::new();
+            let n = match reader.read_until(b'\n', &mut raw_line) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(_) => break,
+            };
+            if raw_line.last() != Some(&b'\n') {
                 break; // incomplete trailing line: wait for the next scan
             }
-            let line_offset = state.offset + consumed as u64;
-            consumed += raw_line.len();
-            let Ok(text) = std::str::from_utf8(&raw_line[..raw_line.len() - 1]) else {
+            let line_offset = state.offset + consumed;
+            consumed += n as u64;
+            let Some(without_newline) = raw_line.strip_suffix(b"\n") else {
+                break;
+            };
+            let Ok(text) = std::str::from_utf8(without_newline) else {
                 continue;
             };
-            process_line(text, path, line_offset, state, now, out);
+            process_line(text, line_offset, state, now, out);
         }
-        state.offset += consumed as u64;
+        state.offset += consumed;
     }
 }
 
@@ -139,7 +163,6 @@ struct RolloutLine {
 
 fn process_line(
     text: &str,
-    path: &Path,
     byte_offset: u64,
     state: &mut FileState,
     now: i64,
@@ -165,7 +188,7 @@ fn process_line(
                 .as_deref()
                 .and_then(ts_core::time::parse_timestamp_str)
                 .unwrap_or(now);
-            handle_token_count(&payload, path, byte_offset, timestamp, state, out);
+            handle_token_count(&payload, byte_offset, timestamp, state, out);
         }
         _ => {}
     }
@@ -173,13 +196,15 @@ fn process_line(
 
 fn handle_token_count(
     payload: &serde_json::Value,
-    path: &Path,
     byte_offset: u64,
     timestamp: i64,
     state: &mut FileState,
     out: &mut ScanOutput,
 ) {
-    if let Some(rate_limits) = payload.get("rate_limits").and_then(rollout_rate_limits) {
+    if let Some(rate_limits) = payload
+        .get("rate_limits")
+        .and_then(|v| rollout_rate_limits(v, timestamp))
+    {
         let newer = out
             .latest_rate_limits
             .as_ref()
@@ -228,11 +253,17 @@ fn handle_token_count(
             .clone()
             .unwrap_or_else(|| DEFAULT_MODEL.to_string()),
         counts,
-        dedup_key: format!("{}:{byte_offset}", path.display()),
+        // Built from the file name (which survives the sessions ->
+        // archived_sessions move) rather than the full path, so a moved
+        // session's already-counted lines are not counted again.
+        dedup_key: format!("{}:{byte_offset}", state.file_name),
     });
 }
 
-fn rollout_rate_limits(value: &serde_json::Value) -> Option<RateLimitSnapshotDto> {
+fn rollout_rate_limits(
+    value: &serde_json::Value,
+    line_timestamp: i64,
+) -> Option<RateLimitSnapshotDto> {
     if value.is_null() {
         return None;
     }
@@ -241,10 +272,14 @@ fn rollout_rate_limits(value: &serde_json::Value) -> Option<RateLimitSnapshotDto
         if w.is_null() {
             return None;
         }
-        let resets_at = w
-            .get("resets_at")
-            .and_then(|v| v.as_i64())
-            .or_else(|| w.get("resets_in_seconds").and_then(|v| v.as_i64()));
+        // `resets_in_seconds` is relative to this line's own timestamp, not
+        // an absolute epoch value: treating it as absolute would report a
+        // reset time that is off by however old the rollout line is.
+        let resets_at = w.get("resets_at").and_then(|v| v.as_i64()).or_else(|| {
+            w.get("resets_in_seconds")
+                .and_then(|v| v.as_i64())
+                .map(|secs| line_timestamp.saturating_add(secs))
+        });
         Some(RateLimitWindowDto {
             used_percent: w
                 .get("used_percent")
@@ -459,27 +494,91 @@ mod tests {
 
     #[test]
     fn model_falls_back_to_default_without_turn_context() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("sessions/rollout-e.jsonl");
-        write_lines(
-            &path,
-            &[&token_count_line("2026-09-28T12:00:00Z", 10, 5, 0, 5, 0)],
-        );
-        let mut scanner = RolloutScanner::new();
-        let out = scanner.scan(&[dir.path().to_path_buf()], 0);
+        let out = scan_one_line_file("sessions/rollout-e.jsonl");
         assert_eq!(out.events[0].model, DEFAULT_MODEL);
     }
 
     #[test]
     fn archived_sessions_are_scanned_too() {
+        let out = scan_one_line_file("archived_sessions/rollout-f.jsonl");
+        assert_eq!(out.events.len(), 1);
+    }
+
+    /// Write one `token_count` line at `relative_path` under a fresh tempdir
+    /// and scan it once.
+    fn scan_one_line_file(relative_path: &str) -> ScanOutput {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("archived_sessions/rollout-f.jsonl");
+        let path = dir.path().join(relative_path);
         write_lines(
             &path,
             &[&token_count_line("2026-09-28T12:00:00Z", 10, 5, 0, 5, 0)],
         );
         let mut scanner = RolloutScanner::new();
+        scanner.scan(&[dir.path().to_path_buf()], 0)
+    }
+
+    #[test]
+    fn moving_session_to_archived_does_not_double_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_path = dir.path().join("sessions/2026/09/28/rollout-g.jsonl");
+        write_lines(
+            &sessions_path,
+            &[&token_count_line("2026-09-28T12:00:00Z", 100, 50, 0, 50, 0)],
+        );
+        let mut scanner = RolloutScanner::new();
         let out = scanner.scan(&[dir.path().to_path_buf()], 0);
         assert_eq!(out.events.len(), 1);
+
+        // Same content, same inode, new location: rename (not copy) so the
+        // move preserves the inode, exactly like the real session rotation.
+        let archived_path = dir.path().join("archived_sessions/rollout-g.jsonl");
+        std::fs::create_dir_all(archived_path.parent().unwrap()).unwrap();
+        std::fs::rename(&sessions_path, &archived_path).unwrap();
+        let out2 = scanner.scan(&[dir.path().to_path_buf()], 0);
+        assert!(
+            out2.events.is_empty(),
+            "moved file's already-scanned line must not be counted again"
+        );
+
+        // A genuinely new line appended after the move is still picked up.
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&archived_path)
+            .unwrap();
+        std::io::Write::write_all(
+            &mut file,
+            format!(
+                "{}\n",
+                token_count_line("2026-09-28T12:05:00Z", 250, 100, 20, 80, 5)
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let out3 = scanner.scan(&[dir.path().to_path_buf()], 0);
+        assert_eq!(out3.events.len(), 1);
+    }
+
+    /// `rollout_rate_limits`'s `primary.resets_at` for one raw `primary` window.
+    fn primary_resets_at(primary: serde_json::Value) -> Option<i64> {
+        let value = serde_json::json!({ "primary": primary });
+        rollout_rate_limits(&value, 1_000)
+            .and_then(|s| s.primary)
+            .and_then(|w| w.resets_at)
+    }
+
+    #[test]
+    fn resets_in_seconds_is_relative_to_the_line_timestamp() {
+        let resets_at = primary_resets_at(
+            serde_json::json!({"used_percent": 5.0, "window_minutes": 10080, "resets_in_seconds": 3600}),
+        );
+        assert_eq!(resets_at, Some(4_600));
+    }
+
+    #[test]
+    fn resets_at_absolute_value_takes_priority_over_resets_in_seconds() {
+        let resets_at = primary_resets_at(serde_json::json!({
+            "used_percent": 5.0, "window_minutes": 10080, "resets_at": 999, "resets_in_seconds": 3600
+        }));
+        assert_eq!(resets_at, Some(999));
     }
 }

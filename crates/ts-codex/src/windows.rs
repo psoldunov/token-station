@@ -163,6 +163,22 @@ pub fn map_rate_limits(
     (windows, credits, plan)
 }
 
+/// Apply rollover to a window whose `resets_at` has already passed: zero the
+/// usage, clear the reset time and mark the source, so stale rollout-derived
+/// data isn't shown as still-elevated usage past its own reset. Same
+/// semantics as `ts_claude::state::apply_rollover`.
+pub fn apply_rollover(window: UsageWindow, now: i64) -> UsageWindow {
+    match window.resets_at {
+        Some(r) if r <= now => UsageWindow {
+            used_percent: 0.0,
+            resets_at: None,
+            source: "rollover".to_string(),
+            ..window
+        },
+        _ => window,
+    }
+}
+
 /// Credits row from a rate-limit snapshot's credits plus the reset-credits summary.
 pub fn map_credits(
     credits: &CreditsDto,
@@ -196,6 +212,39 @@ pub fn map_credits(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One rolled-over `codex:primary` window with the given `used_percent`/`resets_at`.
+    fn rolled_primary(used_percent: f64, resets_at: i64, now: i64) -> UsageWindow {
+        let snapshot = RateLimitSnapshotDto {
+            limit_id: Some("codex".into()),
+            primary: Some(crate::dto::RateLimitWindowDto {
+                used_percent,
+                window_duration_mins: Some(10080),
+                resets_at: Some(resets_at),
+            }),
+            ..Default::default()
+        };
+        map_rate_limit_snapshot("codex", &snapshot, 100, "rollout")
+            .into_iter()
+            .map(|w| apply_rollover(w, now))
+            .next()
+            .unwrap()
+    }
+
+    #[test]
+    fn rollover_zeroes_usage_for_windows_whose_reset_has_passed() {
+        let rolled = rolled_primary(90.0, 400, 500);
+        assert_eq!(rolled.used_percent, 0.0);
+        assert_eq!(rolled.resets_at, None);
+        assert_eq!(rolled.source, "rollover");
+    }
+
+    #[test]
+    fn rollover_leaves_future_resets_untouched() {
+        let rolled = rolled_primary(10.0, 9_999, 500);
+        assert_eq!(rolled.used_percent, 10.0);
+        assert_eq!(rolled.source, "rollout");
+    }
 
     #[test]
     fn plan_labels_known_and_unknown_types() {

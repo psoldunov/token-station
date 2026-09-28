@@ -14,7 +14,8 @@ import {DaemonProxy} from './lib/daemonProxy.js';
 
 /** Matches ts-core's MIN_LIMITS_INTERVAL_SECS. */
 const MIN_LIMITS_INTERVAL_SECONDS = 120;
-const MAX_LIMITS_INTERVAL_SECONDS = 3600;
+/** A day; the same ceiling the Plasma applet's settings page offers. */
+const MAX_LIMITS_INTERVAL_SECONDS = 24 * 60 * 60;
 /** Coalesce keystrokes on the spin rows before writing back to the daemon. */
 const WRITE_DEBOUNCE_MS = 400;
 

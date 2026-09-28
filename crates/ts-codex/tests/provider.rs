@@ -87,6 +87,16 @@ fn base_env(dir: &Path, binary: PathBuf) -> CodexEnv {
     }
 }
 
+/// A default-config provider backed by a fake `codex` replaying `steps`.
+fn provider_with_steps(dir: &Path, spawn_log: &Path, steps: &[Step]) -> CodexProvider {
+    let binary = write_fake_codex(dir, "codex", steps, spawn_log);
+    CodexProvider::with_env(
+        CodexConfig::default(),
+        shared_bundled(),
+        base_env(dir, binary),
+    )
+}
+
 fn init_step() -> Step {
     step(1, fixture("initialize_response.json"))
 }
@@ -148,12 +158,7 @@ async fn api_key_account_reports_no_windows() {
         init_step(),
         account_step(2, with_id(apikey_account_body(), 2)),
     ];
-    let binary = write_fake_codex(dir.path(), "codex", &steps, &spawn_log);
-    let provider = CodexProvider::with_env(
-        CodexConfig::default(),
-        shared_bundled(),
-        base_env(dir.path(), binary),
-    );
+    let provider = provider_with_steps(dir.path(), &spawn_log, &steps);
 
     let outcome = provider.refresh_limits(true).await;
     assert_eq!(outcome, ts_core::RefreshOutcome::Updated);
@@ -172,12 +177,7 @@ async fn unauthenticated_account_reports_message() {
         2,
     );
     let steps = [init_step(), account_step(2, unauth)];
-    let binary = write_fake_codex(dir.path(), "codex", &steps, &spawn_log);
-    let provider = CodexProvider::with_env(
-        CodexConfig::default(),
-        shared_bundled(),
-        base_env(dir.path(), binary),
-    );
+    let provider = provider_with_steps(dir.path(), &spawn_log, &steps);
 
     provider.refresh_limits(true).await;
     let snapshot = provider.snapshot(0);
@@ -195,12 +195,7 @@ async fn chatgpt_account_maps_windows_credits_and_account_tokens() {
         step(1, fixture("rate_limits_read_response.json")),
         step(1, fixture("usage_read_response.json")),
     ];
-    let binary = write_fake_codex(dir.path(), "codex", &steps, &spawn_log);
-    let provider = CodexProvider::with_env(
-        CodexConfig::default(),
-        shared_bundled(),
-        base_env(dir.path(), binary),
-    );
+    let provider = provider_with_steps(dir.path(), &spawn_log, &steps);
 
     let outcome = provider.refresh_limits(true).await;
     assert_eq!(outcome, ts_core::RefreshOutcome::Updated);
@@ -258,6 +253,35 @@ async fn unsupported_method_falls_back_to_http() {
     assert_eq!(snapshot.state, ProviderState::Ok);
     assert_eq!(snapshot.plan.as_deref(), Some("Plus"));
     assert_eq!(snapshot.windows[0].source, "http");
+}
+
+#[tokio::test]
+async fn missing_account_usage_read_keeps_windows_and_plan() {
+    // `account/usage/read` is optional: an app-server that returns -32600
+    // for it must not lose the windows/credits/plan already fetched from
+    // `account/rateLimits/read`.
+    let dir = tempfile::tempdir().unwrap();
+    let spawn_log = dir.path().join("spawns.log");
+    let unsupported_usage = with_id(
+        json!({"error": {"code": -32600, "message": "unknown variant `account/usage/read`"}}),
+        1,
+    );
+    let steps = [
+        init_step(),
+        account_step(2, fixture("account_read_response.json")),
+        step(1, fixture("rate_limits_read_response.json")),
+        step(1, unsupported_usage),
+    ];
+    let provider = provider_with_steps(dir.path(), &spawn_log, &steps);
+
+    let outcome = provider.refresh_limits(true).await;
+    assert_eq!(outcome, ts_core::RefreshOutcome::Updated);
+    let snapshot = provider.snapshot(0);
+    assert_eq!(snapshot.state, ProviderState::Ok);
+    assert_eq!(snapshot.plan.as_deref(), Some("Pro"));
+    assert_eq!(snapshot.windows.len(), 1);
+    assert_eq!(snapshot.windows[0].id, "codex:primary");
+    assert!(snapshot.account_tokens.is_none());
 }
 
 #[tokio::test]
@@ -432,7 +456,11 @@ async fn rollout_rate_limits_are_used_as_last_resort() {
     let outcome = provider.refresh_limits(true).await;
     assert_eq!(outcome, ts_core::RefreshOutcome::Updated);
     let snapshot = provider.snapshot(0);
-    assert_eq!(snapshot.state, ProviderState::Ok);
+    // Rollout-derived data is shown as `Stale`, never `Ok`: it can be
+    // arbitrarily old, and `updated_at` reflects the rollout line's own
+    // timestamp rather than "now".
+    assert_eq!(snapshot.state, ProviderState::Stale);
+    assert_eq!(snapshot.updated_at, Some(1_790_596_800)); // 2026-09-28T12:00:00Z
     assert_eq!(snapshot.windows[0].source, "rollout");
     assert_eq!(snapshot.windows[0].used_percent, 42.0);
     assert!(snapshot.message.unwrap().contains("local session logs"));

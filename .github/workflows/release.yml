@@ -5,10 +5,34 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  appimage:
+  # Nothing is published before the same gate CI uses has passed on the tag.
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # The GNOME VM check boots a NixOS guest and needs /dev/kvm.
+      - name: Enable KVM
+        shell: bash
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            system-features = nixos-test benchmark big-parallel kvm
+
+      - name: nix flake check
+        run: nix flake check -L --keep-going
+
+  build:
+    needs: check
     strategy:
       matrix:
         include:
@@ -22,6 +46,25 @@ jobs:
       - uses: cachix/install-nix-action@v31
       - name: Build AppImage
         run: nix build -L .#appimage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TokenStation-${{ matrix.arch }}.AppImage
+          path: result/TokenStation-${{ matrix.arch }}.AppImage
+          if-no-files-found: error
+
+  # One job creates the release, so the two builds cannot race each other.
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: TokenStation-*.AppImage
+          merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
-          files: result/TokenStation-${{ matrix.arch }}.AppImage
+          files: artifacts/TokenStation-*.AppImage
+          fail_on_unmatched_files: true

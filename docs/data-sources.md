@@ -29,7 +29,8 @@ to keyed windows, so new codenamed keys are tolerated.
 - Expired access token: the provider runs `claude auth status --json` at most every
   10 min (the CLI refreshes its own token), re-reads the file, and otherwise shows stale
   data with "Open Claude Code to refresh it".
-- Polling: default every 300 s, never faster than 180 s (forced refreshes: 30 s floor);
+- Polling: default every 300 s, and `claude.min_endpoint_interval_secs` (default 180 s,
+  floor 120 s) is the shortest gap between two endpoint calls (forced refreshes: 30 s floor);
   429 honours `Retry-After`, else exponential backoff to 1 h.
 - **Why the User-Agent:** without the CLI's User-Agent the endpoint rate-limits
   aggressively (widely reported by other monitors). It is configurable

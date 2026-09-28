@@ -10,6 +10,9 @@ BusName=dev.soldunov.TokenStation
 ExecStart=@bindir@/token-station daemon
 Restart=on-failure
 RestartSec=5
+# Exit 75 (EX_TEMPFAIL) means another daemon already owns the bus name;
+# restarting would only lose that race again.
+RestartPreventExitStatus=75
 NoNewPrivileges=yes
 
 [Install]

@@ -6,12 +6,18 @@ use ts_core::discovery::SearchEnv;
 
 /// A tempdir laid out as a Claude config dir, with a valid (far-future
 /// expiry) credentials file so tests don't race the real wall clock.
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "compiled separately into every integration test binary; not every binary uses every item"
+)]
 pub struct Fixture {
     pub dir: tempfile::TempDir,
 }
 
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "compiled separately into every integration test binary; not every binary uses every item"
+)]
 impl Fixture {
     pub fn new() -> Fixture {
         let dir = tempfile::tempdir().unwrap();
@@ -62,7 +68,10 @@ pub const VALID_CREDENTIALS: &str = r#"{
   }
 }"#;
 
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "compiled separately into every integration test binary; not every binary uses every item"
+)]
 pub fn oauth_fixture(name: &str) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")

@@ -91,13 +91,20 @@ pub struct DailyBucketDto {
 
 #[cfg(test)]
 mod tests {
+    use serde::de::DeserializeOwned;
+
     use super::*;
+
+    /// Parse `fixtures/<name>`'s `result` field as `T`.
+    fn result_fixture<T: DeserializeOwned>(raw: &str) -> T {
+        let value: serde_json::Value = serde_json::from_str(raw).unwrap();
+        serde_json::from_value(value["result"].clone()).unwrap()
+    }
 
     #[test]
     fn parses_chatgpt_account_fixture() {
-        let raw = include_str!("../tests/fixtures/account_read_response.json");
-        let value: serde_json::Value = serde_json::from_str(raw).unwrap();
-        let result: AccountReadResult = serde_json::from_value(value["result"].clone()).unwrap();
+        let result: AccountReadResult =
+            result_fixture(include_str!("../tests/fixtures/account_read_response.json"));
         assert!(result.requires_openai_auth);
         match result.account {
             Some(AccountInfo::Chatgpt { plan_type }) => assert_eq!(plan_type, Some("pro".into())),
@@ -107,9 +114,9 @@ mod tests {
 
     #[test]
     fn parses_rate_limits_fixture() {
-        let raw = include_str!("../tests/fixtures/rate_limits_read_response.json");
-        let value: serde_json::Value = serde_json::from_str(raw).unwrap();
-        let result: RateLimitsReadResult = serde_json::from_value(value["result"].clone()).unwrap();
+        let result: RateLimitsReadResult = result_fixture(include_str!(
+            "../tests/fixtures/rate_limits_read_response.json"
+        ));
         assert_eq!(result.ordinary_usage_allowed, Some(true));
         let codex = result.rate_limits_by_limit_id.get("codex").unwrap();
         assert_eq!(
@@ -125,9 +132,8 @@ mod tests {
 
     #[test]
     fn parses_usage_fixture() {
-        let raw = include_str!("../tests/fixtures/usage_read_response.json");
-        let value: serde_json::Value = serde_json::from_str(raw).unwrap();
-        let result: UsageReadResult = serde_json::from_value(value["result"].clone()).unwrap();
+        let result: UsageReadResult =
+            result_fixture(include_str!("../tests/fixtures/usage_read_response.json"));
         assert_eq!(result.summary.unwrap().lifetime_tokens, Some(4_743_603_614));
         assert_eq!(result.daily_usage_buckets.len(), 4);
     }

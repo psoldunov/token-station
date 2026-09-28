@@ -15,6 +15,7 @@ pub mod fixture;
 pub mod history;
 pub mod integration;
 pub mod notify;
+pub mod output;
 pub mod paths;
 pub mod pricing_refresh;
 pub mod publish;

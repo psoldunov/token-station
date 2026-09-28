@@ -6,8 +6,8 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::integration::Dirs;
 use crate::integration::step::Step;
+use crate::integration::{Dirs, quoting};
 
 /// Unit file name.
 pub const UNIT: &str = "token-station.service";
@@ -23,10 +23,18 @@ pub fn unit_path(dirs: &Dirs) -> PathBuf {
     dirs.config.join("systemd/user").join(UNIT)
 }
 
+/// Quote one word of a systemd command line.
+///
+/// Inside the double quotes a backslash and a double quote each need an extra
+/// backslash, and a literal per-cent sign is written `%%` so systemd does not read
+/// it as a specifier.
+pub fn quote_word(value: &str) -> String {
+    quoting::quoted(value, &quoting::SYSTEMD_ESCAPED)
+}
+
 /// The unit text for `exec`.
 pub fn unit_text(exec: &Path) -> String {
-    let quoted = format!("\"{}\"", exec.display());
-    TEMPLATE.replace(BINDIR_PLACEHOLDER, &quoted)
+    TEMPLATE.replace(BINDIR_PLACEHOLDER, &quote_word(&exec.to_string_lossy()))
 }
 
 /// Write the unit, then reload and enable it when `systemctl` is available.
@@ -56,10 +64,16 @@ fn run(tool: &Path, args: &[&str]) -> Step {
     }
 }
 
-/// `systemctl --user disable --now token-station.service`, for `uninstall`.
+/// Stop and forget the unit, for `uninstall`.
+///
+/// The reload comes second: systemd has to be told the file is gone, or the unit
+/// stays in its list as `not-found` until the next login.
 pub fn disable_steps(systemctl: Option<&Path>) -> Vec<Step> {
     match systemctl {
-        Some(tool) => vec![run(tool, &["disable", "--now", UNIT])],
+        Some(tool) => vec![
+            run(tool, &["disable", "--now", UNIT]),
+            run(tool, &["daemon-reload"]),
+        ],
         None => Vec::new(),
     }
 }
@@ -134,19 +148,39 @@ mod tests {
     }
 
     #[test]
-    fn uninstall_disables_and_stops_in_one_call() {
+    fn uninstall_stops_the_unit_and_then_reloads() {
         let tool = PathBuf::from("/bin/systemctl");
         assert_eq!(
             disable_steps(Some(&tool)),
-            vec![Step::Run {
-                program: tool,
-                args: vec![
-                    "--user".into(),
-                    "disable".into(),
-                    "--now".into(),
-                    UNIT.into()
-                ],
-            }]
+            vec![
+                Step::Run {
+                    program: tool.clone(),
+                    args: vec![
+                        "--user".into(),
+                        "disable".into(),
+                        "--now".into(),
+                        UNIT.into()
+                    ],
+                },
+                Step::Run {
+                    program: tool,
+                    args: vec!["--user".into(), "daemon-reload".into()],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn exec_start_is_quoted_the_way_systemd_reads_it() {
+        assert_eq!(quote_word("/opt/Token Station"), "\"/opt/Token Station\"");
+        assert_eq!(quote_word(r#"/opt/we"ird\x"#), r#""/opt/we\"ird\\x""#);
+        // `%` starts a specifier unless it is doubled.
+        assert_eq!(quote_word("/opt/100%.AppImage"), "\"/opt/100%%.AppImage\"");
+
+        let text = unit_text(Path::new("/apps/50% \"off\".AppImage"));
+        assert!(
+            text.contains(r#"ExecStart="/apps/50%% \"off\".AppImage" daemon"#),
+            "{text}"
         );
     }
 }

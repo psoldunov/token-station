@@ -8,9 +8,12 @@
 pub mod claude_settings;
 pub mod dbus_activation;
 pub mod desktop;
+pub mod existing;
 pub mod gnome;
 pub mod manifest;
 pub mod plasma;
+pub mod quoting;
+pub mod removal;
 pub mod step;
 pub mod systemd;
 
@@ -19,6 +22,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 
 use crate::integration::desktop::Desktop;
+use crate::integration::existing::Previous;
 use crate::integration::manifest::Manifest;
 use crate::integration::step::{Outcome, Step};
 use crate::paths::Env;
@@ -57,6 +61,9 @@ pub struct Session {
     pub appdir: Option<String>,
     pub path: Option<String>,
     pub claude_config_dir: Option<String>,
+    /// `$DBUS_SESSION_BUS_ADDRESS`; kept explicit so a test never reaches the
+    /// developer's own session bus and stops their tray.
+    pub bus_address: Option<String>,
 }
 
 impl Session {
@@ -69,6 +76,7 @@ impl Session {
             appdir: var("APPDIR"),
             path: var("PATH"),
             claude_config_dir: var("CLAUDE_CONFIG_DIR"),
+            bus_address: var("DBUS_SESSION_BUS_ADDRESS"),
         }
     }
 }
@@ -101,6 +109,8 @@ pub struct SetupOptions {
     pub claude_statusline: bool,
     pub payload_dir: Option<PathBuf>,
     pub dry_run: bool,
+    /// Replace files `setup` did not install, and shadow a packaged install.
+    pub force: bool,
 }
 
 /// The binary the installed files should point at.
@@ -163,8 +173,21 @@ pub fn plan(options: &SetupOptions, env: &Env, session: &Session) -> anyhow::Res
         )?,
         Desktop::Other => Vec::new(),
     };
-    steps.extend(dbus_activation::steps(&dirs, &exec));
-    steps.extend(systemd::steps(&dirs, &exec, systemctl.as_deref()));
+    steps.extend(unless_packaged(
+        dbus_activation::steps(&dirs, &exec),
+        existing::packaged(&existing::service_candidates(
+            &dirs.home,
+            dbus_activation::SERVICE_FILE,
+        )),
+        options.force,
+        "D-Bus activation file",
+    ));
+    steps.extend(unless_packaged(
+        systemd::steps(&dirs, &exec, systemctl.as_deref()),
+        existing::packaged(&existing::unit_candidates(&dirs.home, systemd::UNIT)),
+        options.force,
+        "systemd user unit",
+    ));
     steps.extend(desktop::shared_steps(&dirs, &exec));
     if target == Desktop::Other {
         steps.push(desktop::autostart_step(&dirs, &exec));
@@ -184,6 +207,23 @@ pub fn plan(options: &SetupOptions, env: &Env, session: &Session) -> anyhow::Res
     })
 }
 
+/// Drop `steps` when a package already provides `what` and `--force` was not given.
+fn unless_packaged(
+    steps: Vec<Step>,
+    packaged: Option<PathBuf>,
+    force: bool,
+    what: &str,
+) -> Vec<Step> {
+    match packaged {
+        Some(path) if !force => vec![Step::Note(format!(
+            "a packaged {what} is already installed at {}, so it was left in charge \
+             (re-run with --force to shadow it)",
+            path.display()
+        ))],
+        _ => steps,
+    }
+}
+
 /// Install everything, or print the plan when `--dry-run` was given.
 pub fn setup(
     options: &SetupOptions,
@@ -198,12 +238,29 @@ pub fn setup(
         return Ok(dry_run_summary(&plan, &manifest_path));
     }
 
+    let owned = recorded_paths(previous.as_ref());
     let mut manifest = Manifest::new(&plan.exec, plan.desktop.as_str(), now);
-    let outcome = step::execute(
+    let outcome = match step::execute(
         &plan.steps,
         &mut manifest,
-        previous.as_ref().and_then(|old| old.claude.as_ref()),
-    )?;
+        Previous {
+            owned: &owned,
+            claude: previous.as_ref().and_then(|old| old.claude.as_ref()),
+            force: options.force,
+        },
+    ) {
+        Ok(outcome) => outcome,
+        // Whatever did land is already recorded: store it, or `uninstall` would
+        // have nothing to undo after a half-finished run.
+        Err(error) => {
+            return Err(save_partial(
+                manifest,
+                previous.as_ref(),
+                &manifest_path,
+                error,
+            ));
+        }
+    };
     manifest.systemd_unit = Some(systemd::unit_path(&Dirs::resolve(env)));
     if outcome.succeeded(gnome::EXTENSION_UUID) {
         manifest.gnome_extension = Some(gnome::EXTENSION_UUID.to_string());
@@ -213,6 +270,40 @@ pub fn setup(
         .save(&manifest_path)
         .with_context(|| format!("cannot write {}", manifest_path.display()))?;
     Ok(setup_summary(&plan, &manifest, &outcome, &manifest_path))
+}
+
+/// Every path a previous run recorded, so a re-run may rewrite exactly those.
+fn recorded_paths(previous: Option<&Manifest>) -> Vec<PathBuf> {
+    let Some(previous) = previous else {
+        return Vec::new();
+    };
+    previous
+        .dirs
+        .iter()
+        .chain(previous.files.iter())
+        .cloned()
+        .collect()
+}
+
+/// Keep the record of a failed run, and say where it is.
+fn save_partial(
+    mut manifest: Manifest,
+    previous: Option<&Manifest>,
+    manifest_path: &Path,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    carry_forward(&mut manifest, previous);
+    match manifest.save(manifest_path) {
+        Ok(()) => error.context(format!(
+            "setup did not finish; what it had installed is recorded in {} \
+             and `token-station uninstall` will remove it",
+            manifest_path.display()
+        )),
+        Err(write_error) => error.context(format!(
+            "setup did not finish, and {} could not be written either: {write_error}",
+            manifest_path.display()
+        )),
+    }
 }
 
 /// Keep what an earlier run installed so a later `uninstall` still finds it.
@@ -286,26 +377,36 @@ pub fn uninstall(env: &Env, session: &Session) -> anyhow::Result<String> {
     };
     let mut outcome = Outcome::default();
     let mut scratch = Manifest::new(&manifest.exec, &manifest.desktop, manifest.installed_at);
-    step::execute(&stop_steps(&manifest, session), &mut scratch, None)?;
+    let stopped = step::execute(
+        &stop_steps(&manifest, session),
+        &mut scratch,
+        Previous::default(),
+    )?;
+    outcome.warnings.extend(stopped.warnings);
+    outcome.notes.extend(stopped.notes);
 
     let statusline = restore_statusline(&manifest, &mut outcome);
-    let removed = remove_recorded(&manifest, &mut outcome);
+    let keep_backup = statusline.is_empty();
+    let removed = remove_recorded(&manifest, &Dirs::resolve(env), keep_backup, &mut outcome);
     if let Err(error) = std::fs::remove_file(&manifest_path) {
         outcome
             .warnings
             .push(format!("cannot remove the manifest: {error}"));
     }
     Ok(format!(
-        "Token Station is uninstalled.{}{}{}",
+        "Token Station is uninstalled.{}{}{}{}",
         bullets("Removed:", &removed),
         bullets("Restored:", &statusline),
+        bullets("Notes:", &outcome.notes),
         bullets("Warnings:", &outcome.warnings),
     ))
 }
 
-/// Stop the unit and disable the extension before the files go.
+/// Stop the tray and the unit, and disable the extension, before the files go.
 fn stop_steps(manifest: &Manifest, session: &Session) -> Vec<Step> {
-    let mut steps = Vec::new();
+    let mut steps = vec![Step::StopTray {
+        bus_address: session.bus_address.clone(),
+    }];
     if manifest.systemd_unit.is_some() {
         steps.extend(systemd::disable_steps(
             on_path(systemd::SYSTEMCTL, session.path.as_deref()).as_deref(),
@@ -342,9 +443,23 @@ fn restore_statusline(manifest: &Manifest, outcome: &mut Outcome) -> Vec<String>
     }
 }
 
-fn remove_recorded(manifest: &Manifest, outcome: &mut Outcome) -> Vec<String> {
+/// Remove what the manifest records, after checking each path is one `setup` writes.
+///
+/// `keep_backup` holds on to the `settings.json` copy when the status line was not
+/// put back: it is the only way to recover the original by hand.
+fn remove_recorded(
+    manifest: &Manifest,
+    dirs: &Dirs,
+    keep_backup: bool,
+    outcome: &mut Outcome,
+) -> Vec<String> {
+    let backup = manifest.claude.as_ref().map(|record| record.backup.clone());
     let mut removed = Vec::new();
     for dir in &manifest.dirs {
+        if !removal::removable_dir(dir, dirs) {
+            outcome.warnings.push(refused(dir));
+            continue;
+        }
         match std::fs::symlink_metadata(dir) {
             Ok(meta) if meta.is_dir() => match std::fs::remove_dir_all(dir) {
                 Ok(()) => removed.push(dir.display().to_string()),
@@ -357,6 +472,17 @@ fn remove_recorded(manifest: &Manifest, outcome: &mut Outcome) -> Vec<String> {
         }
     }
     for file in &manifest.files {
+        if keep_backup && backup.as_deref() == Some(file.as_path()) {
+            outcome.notes.push(format!(
+                "kept the backup at {}: the status line was not put back",
+                file.display()
+            ));
+            continue;
+        }
+        if !removal::removable_file(file, dirs, backup.as_deref()) {
+            outcome.warnings.push(refused(file));
+            continue;
+        }
         match std::fs::remove_file(file) {
             Ok(()) => removed.push(file.display().to_string()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -366,6 +492,13 @@ fn remove_recorded(manifest: &Manifest, outcome: &mut Outcome) -> Vec<String> {
         }
     }
     removed
+}
+
+fn refused(path: &Path) -> String {
+    format!(
+        "{} is not a path Token Station installs; left it alone",
+        path.display()
+    )
 }
 
 #[cfg(test)]

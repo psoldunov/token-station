@@ -14,6 +14,7 @@ use crate::clock::system_clock;
 use crate::daemon::providers;
 use crate::dbus::client;
 use crate::notify::compact_duration;
+use crate::output;
 use crate::paths::Paths;
 use crate::pricing_refresh;
 
@@ -134,7 +135,7 @@ pub async fn status(paths: &Paths, as_json: bool) -> anyhow::Result<()> {
     } else {
         render(&snapshot, system_clock()())
     };
-    println!("{out}");
+    output::line(&out);
     Ok(())
 }
 

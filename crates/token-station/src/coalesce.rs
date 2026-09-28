@@ -42,12 +42,13 @@ impl Coalescer {
         };
 
         if leader {
+            // A guard, not a straight line: a refresh that panics must still hand
+            // leadership back, or `Refresh()` is wedged for the rest of the process.
+            let _release = Release {
+                running: &self.running,
+                generation: &self.generation,
+            };
             work().await;
-            {
-                let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
-                *running = false;
-            }
-            self.generation.send_modify(|value| *value += 1);
             return;
         }
 
@@ -56,6 +57,20 @@ impl Coalescer {
                 return;
             }
         }
+    }
+}
+
+/// Clears the running flag and wakes the followers, whether the run returned or
+/// unwound.
+struct Release<'a> {
+    running: &'a Mutex<bool>,
+    generation: &'a watch::Sender<u64>,
+}
+
+impl Drop for Release<'_> {
+    fn drop(&mut self) {
+        *self.running.lock().unwrap_or_else(|e| e.into_inner()) = false;
+        self.generation.send_modify(|value| *value += 1);
     }
 }
 
@@ -127,5 +142,28 @@ mod tests {
         coalescer.run(|| async {}).await;
         assert_eq!(done.load(Ordering::SeqCst), 1);
         leader.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_panicking_run_does_not_wedge_the_gate() {
+        let coalescer = Arc::new(Coalescer::default());
+        let panicked = {
+            let coalescer = Arc::clone(&coalescer);
+            tokio::spawn(async move {
+                coalescer
+                    .run(|| async { panic!("a provider blew up mid-refresh") })
+                    .await;
+            })
+        };
+        assert!(panicked.await.is_err(), "the panic reached the task");
+
+        // The next caller still leads, instead of waiting for a run that is gone.
+        let runs = AtomicUsize::new(0);
+        coalescer
+            .run(|| async {
+                runs.fetch_add(1, Ordering::SeqCst);
+            })
+            .await;
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
     }
 }

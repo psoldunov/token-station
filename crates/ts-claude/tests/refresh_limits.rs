@@ -7,9 +7,33 @@ use ts_core::snapshot::ProviderState;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+/// A provider wired to `server`'s URI, using the shared test fixture defaults.
+/// Returns the [`support::Fixture`] too: it owns the tempdir the provider
+/// reads credentials from, so the caller must keep it alive for as long as
+/// the provider is used.
+fn provider_for(server: &MockServer) -> (ClaudeProvider, support::Fixture) {
+    let fixture = support::Fixture::new();
+    let provider = ClaudeProvider::with_env(
+        fixture.config(),
+        shared_bundled(),
+        fixture.env(&server.uri()),
+    );
+    (provider, fixture)
+}
+
+/// A server that answers every `GET /api/oauth/usage` with `response`.
+async fn mock_oauth_usage(response: ResponseTemplate) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/oauth/usage"))
+        .respond_with(response)
+        .mount(&server)
+        .await;
+    server
+}
+
 #[tokio::test]
 async fn success_updates_windows_credits_and_breakdown() {
-    let fixture = support::Fixture::new();
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api/oauth/usage"))
@@ -21,11 +45,7 @@ async fn success_updates_windows_credits_and_breakdown() {
         .mount(&server)
         .await;
 
-    let provider = ClaudeProvider::with_env(
-        fixture.config(),
-        shared_bundled(),
-        fixture.env(&server.uri()),
-    );
+    let (provider, _fixture) = provider_for(&server);
     let outcome = provider.refresh_limits(false).await;
     assert_eq!(outcome, RefreshOutcome::Updated);
 
@@ -39,19 +59,8 @@ async fn success_updates_windows_credits_and_breakdown() {
 
 #[tokio::test]
 async fn unauthorized_marks_skipped_with_expired_message() {
-    let fixture = support::Fixture::new();
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/oauth/usage"))
-        .respond_with(ResponseTemplate::new(401))
-        .mount(&server)
-        .await;
-
-    let provider = ClaudeProvider::with_env(
-        fixture.config(),
-        shared_bundled(),
-        fixture.env(&server.uri()),
-    );
+    let server = mock_oauth_usage(ResponseTemplate::new(401)).await;
+    let (provider, _fixture) = provider_for(&server);
     let outcome = provider.refresh_limits(false).await;
     match outcome {
         RefreshOutcome::Skipped(msg) => assert!(msg.contains("expired")),
@@ -61,19 +70,8 @@ async fn unauthorized_marks_skipped_with_expired_message() {
 
 #[tokio::test]
 async fn forbidden_disables_endpoint_for_process() {
-    let fixture = support::Fixture::new();
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/oauth/usage"))
-        .respond_with(ResponseTemplate::new(403))
-        .mount(&server)
-        .await;
-
-    let provider = ClaudeProvider::with_env(
-        fixture.config(),
-        shared_bundled(),
-        fixture.env(&server.uri()),
-    );
+    let server = mock_oauth_usage(ResponseTemplate::new(403)).await;
+    let (provider, _fixture) = provider_for(&server);
     let outcome = provider.refresh_limits(false).await;
     assert!(matches!(outcome, RefreshOutcome::Failed(_)));
 
@@ -86,19 +84,9 @@ async fn forbidden_disables_endpoint_for_process() {
 
 #[tokio::test]
 async fn rate_limited_backs_off_using_retry_after() {
-    let fixture = support::Fixture::new();
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/oauth/usage"))
-        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "120"))
-        .mount(&server)
-        .await;
-
-    let provider = ClaudeProvider::with_env(
-        fixture.config(),
-        shared_bundled(),
-        fixture.env(&server.uri()),
-    );
+    let server =
+        mock_oauth_usage(ResponseTemplate::new(429).insert_header("retry-after", "120")).await;
+    let (provider, _fixture) = provider_for(&server);
     let outcome = provider.refresh_limits(false).await;
     assert!(matches!(outcome, RefreshOutcome::Failed(_)));
 
@@ -108,19 +96,8 @@ async fn rate_limited_backs_off_using_retry_after() {
 
 #[tokio::test]
 async fn server_error_keeps_no_data_and_reports_failed() {
-    let fixture = support::Fixture::new();
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/oauth/usage"))
-        .respond_with(ResponseTemplate::new(500))
-        .mount(&server)
-        .await;
-
-    let provider = ClaudeProvider::with_env(
-        fixture.config(),
-        shared_bundled(),
-        fixture.env(&server.uri()),
-    );
+    let server = mock_oauth_usage(ResponseTemplate::new(500)).await;
+    let (provider, _fixture) = provider_for(&server);
     let outcome = provider.refresh_limits(false).await;
     assert!(matches!(outcome, RefreshOutcome::Failed(_)));
     let snap = provider.snapshot(0);

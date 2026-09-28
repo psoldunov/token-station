@@ -11,7 +11,9 @@ use anyhow::Context;
 
 use crate::atomic::write_atomic;
 use crate::integration::claude_settings::{self, Plan as StatuslinePlan};
-use crate::integration::manifest::{ClaudeRecord, Manifest};
+use crate::integration::existing::{self, Previous, Verdict};
+use crate::integration::manifest::Manifest;
+use crate::tray;
 
 /// A single thing `setup` does.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +28,11 @@ pub enum Step {
     Run { program: PathBuf, args: Vec<String> },
     /// Start a command and do not wait for it.
     Spawn { program: PathBuf, args: Vec<String> },
+    /// Ask a running tray to quit, over its own bus name.
+    StopTray {
+        /// Which bus to look on; `None` means `$DBUS_SESSION_BUS_ADDRESS`.
+        bus_address: Option<String>,
+    },
     /// Patch Claude Code's `settings.json`.
     Statusline(StatuslinePlan),
     /// A line for the summary; changes nothing.
@@ -45,6 +52,7 @@ impl Step {
             Step::Write { target, .. } => format!("write {}", target.display()),
             Step::Run { program, args } => format!("run {}", command_line(program, args)),
             Step::Spawn { program, args } => format!("start {}", command_line(program, args)),
+            Step::StopTray { .. } => format!("stop the tray on {}", tray::TRAY_BUS_NAME),
             Step::Statusline(plan) => format!(
                 "patch {} · statusLine = {}",
                 plan.settings.display(),
@@ -81,31 +89,41 @@ impl Outcome {
 }
 
 /// Carry out every step, recording what stuck in `manifest`.
+///
+/// A target that is already there and was not installed by us is skipped with a
+/// warning rather than replaced; see [`existing`].
 pub fn execute(
     steps: &[Step],
     manifest: &mut Manifest,
-    recorded: Option<&ClaudeRecord>,
+    previous: Previous<'_>,
 ) -> anyhow::Result<Outcome> {
     let mut outcome = Outcome::default();
     for step in steps {
         match step {
             Step::CopyTree { source, target } => {
-                copy_tree(source, target)?;
-                manifest.add_dir(target);
+                if may_write(target, previous, &mut outcome) {
+                    copy_tree(source, target)?;
+                    manifest.add_dir(target);
+                }
             }
             Step::CopyFile { source, target } => {
-                copy_file(source, target)?;
-                manifest.add_file(target);
+                if may_write(target, previous, &mut outcome) {
+                    copy_file(source, target)?;
+                    manifest.add_file(target);
+                }
             }
             Step::Write { target, contents } => {
-                write_atomic(target, contents.as_bytes())
-                    .with_context(|| format!("cannot write {}", target.display()))?;
-                manifest.add_file(target);
+                if may_write(target, previous, &mut outcome) {
+                    write_atomic(target, contents.as_bytes())
+                        .with_context(|| format!("cannot write {}", target.display()))?;
+                    manifest.add_file(target);
+                }
             }
             Step::Run { program, args } => run(program, args, &mut outcome),
             Step::Spawn { program, args } => spawn(program, args, &mut outcome),
+            Step::StopTray { bus_address } => stop_tray(bus_address.as_deref(), &mut outcome),
             Step::Statusline(plan) => {
-                let record = claude_settings::apply(plan, recorded)?;
+                let record = claude_settings::apply(plan, previous.claude)?;
                 manifest.add_file(&record.backup);
                 manifest.claude = Some(record);
             }
@@ -113,6 +131,33 @@ pub fn execute(
         }
     }
     Ok(outcome)
+}
+
+/// May `target` be replaced? A refusal is recorded as a warning, not an error: the
+/// rest of the install is still worth doing.
+fn may_write(target: &Path, previous: Previous<'_>, outcome: &mut Outcome) -> bool {
+    match existing::verdict(target, previous) {
+        Verdict::Write => true,
+        Verdict::Skip(why) => {
+            outcome.warnings.push(why);
+            false
+        }
+    }
+}
+
+/// Ask the tray to quit, so `uninstall` does not leave an icon behind.
+fn stop_tray(bus_address: Option<&str>, outcome: &mut Outcome) {
+    let line = format!("stop the tray on {}", tray::TRAY_BUS_NAME);
+    match tray::client::request_quit_blocking(bus_address) {
+        Ok(true) => outcome.ran.push((line, true)),
+        Ok(false) => tracing::debug!("no tray was running"),
+        Err(error) => {
+            outcome
+                .warnings
+                .push(format!("cannot stop the tray: {error}"));
+            outcome.ran.push((line, false));
+        }
+    }
 }
 
 /// Copy `source` over `target`, leaving nothing of a previous version behind.
@@ -194,6 +239,11 @@ mod tests {
         Manifest::new(Path::new("/opt/x.AppImage"), "kde", 0)
     }
 
+    /// Run `steps` on a fresh install with nothing recorded before it.
+    fn fresh(steps: &[Step], manifest: &mut Manifest) -> Outcome {
+        execute(steps, manifest, Previous::default()).expect("the plan runs")
+    }
+
     #[test]
     fn a_copied_tree_is_recorded_as_a_directory_we_own() {
         let dir = tempfile::tempdir().unwrap();
@@ -204,15 +254,13 @@ mod tests {
         let target = dir.path().join("data/plasmoids/dev.soldunov.tokenstation");
 
         let mut manifest = manifest();
-        execute(
+        fresh(
             &[Step::CopyTree {
                 source: source.clone(),
                 target: target.clone(),
             }],
             &mut manifest,
-            None,
-        )
-        .unwrap();
+        );
 
         assert_eq!(
             std::fs::read_to_string(target.join("contents/ui/main.qml")).unwrap(),
@@ -246,7 +294,7 @@ mod tests {
         let unit = dir.path().join("cfg/systemd/user/token-station.service");
 
         let mut manifest = manifest();
-        execute(
+        fresh(
             &[
                 Step::CopyFile {
                     source,
@@ -258,9 +306,7 @@ mod tests {
                 },
             ],
             &mut manifest,
-            None,
-        )
-        .unwrap();
+        );
 
         assert_eq!(std::fs::read_to_string(&icon).unwrap(), "<svg/>");
         assert_eq!(std::fs::read_to_string(&unit).unwrap(), "[Unit]\n");
@@ -274,7 +320,7 @@ mod tests {
     #[test]
     fn a_failing_command_is_a_warning_and_the_plan_carries_on() {
         let mut manifest = manifest();
-        let outcome = execute(
+        let outcome = fresh(
             &[
                 Step::Run {
                     program: PathBuf::from("/bin/false"),
@@ -283,9 +329,7 @@ mod tests {
                 Step::Note("carried on".into()),
             ],
             &mut manifest,
-            None,
-        )
-        .unwrap();
+        );
         assert_eq!(outcome.warnings.len(), 1);
         assert!(outcome.warnings[0].contains("/bin/false --user"));
         assert_eq!(outcome.notes, vec!["carried on"]);
@@ -295,17 +339,121 @@ mod tests {
     #[test]
     fn a_command_that_does_not_exist_is_also_only_a_warning() {
         let mut manifest = manifest();
-        let outcome = execute(
+        let outcome = fresh(
             &[Step::Run {
                 program: PathBuf::from("/nonexistent/systemctl"),
                 args: vec![],
             }],
             &mut manifest,
-            None,
-        )
-        .unwrap();
+        );
         assert_eq!(outcome.warnings.len(), 1);
         assert!(outcome.warnings[0].contains("could not start"));
+    }
+
+    #[test]
+    fn a_target_we_did_not_install_is_skipped_with_a_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("dev.soldunov.TokenStation.service");
+        std::fs::write(&target, "someone else's file").unwrap();
+
+        let mut manifest = manifest();
+        let outcome = fresh(
+            &[Step::Write {
+                target: target.clone(),
+                contents: "[D-BUS Service]\n".into(),
+            }],
+            &mut manifest,
+        );
+
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "someone else's file"
+        );
+        assert_eq!(outcome.warnings.len(), 1);
+        assert!(outcome.warnings[0].contains("--force"), "{outcome:?}");
+        assert!(
+            manifest.files.is_empty(),
+            "a file we skipped is not recorded as ours"
+        );
+    }
+
+    #[test]
+    fn a_target_an_earlier_run_installed_is_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("token-station.service");
+        std::fs::write(&target, "[Unit]\n# old\n").unwrap();
+        let owned = vec![target.clone()];
+
+        let mut manifest = manifest();
+        let outcome = execute(
+            &[Step::Write {
+                target: target.clone(),
+                contents: "[Unit]\n# new\n".into(),
+            }],
+            &mut manifest,
+            Previous {
+                owned: &owned,
+                ..Previous::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "[Unit]\n# new\n");
+        assert!(outcome.warnings.is_empty(), "{outcome:?}");
+        assert_eq!(manifest.files, vec![target]);
+    }
+
+    #[test]
+    fn a_store_symlink_in_the_way_is_never_written_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("token-station.service");
+        std::os::unix::fs::symlink("/nix/store/abc-token-station/unit", &target).unwrap();
+        let owned = vec![target.clone()];
+
+        let mut manifest = manifest();
+        let outcome = execute(
+            &[Step::Write {
+                target: target.clone(),
+                contents: "[Unit]\n".into(),
+            }],
+            &mut manifest,
+            Previous {
+                owned: &owned,
+                force: true,
+                ..Previous::default()
+            },
+        )
+        .unwrap();
+
+        assert!(std::fs::symlink_metadata(&target).unwrap().is_symlink());
+        assert_eq!(outcome.warnings.len(), 1);
+        assert!(outcome.warnings[0].contains("/nix/store"), "{outcome:?}");
+        assert!(manifest.files.is_empty());
+    }
+
+    #[test]
+    fn a_copied_tree_over_a_stranger_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("payload");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("metadata.json"), "{}").unwrap();
+        let target = dir.path().join("plasmoids/dev.soldunov.tokenstation");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("theirs.qml"), "mine").unwrap();
+
+        let mut manifest = manifest();
+        let outcome = fresh(
+            &[Step::CopyTree {
+                source,
+                target: target.clone(),
+            }],
+            &mut manifest,
+        );
+
+        assert!(target.join("theirs.qml").exists(), "nothing was removed");
+        assert!(!target.join("metadata.json").exists());
+        assert_eq!(outcome.warnings.len(), 1);
+        assert!(manifest.dirs.is_empty());
     }
 
     #[test]

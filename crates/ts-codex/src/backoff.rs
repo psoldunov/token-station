@@ -53,9 +53,16 @@ impl Backoff {
 mod tests {
     use super::*;
 
+    fn backoff(initial_secs: u64, max_secs: u64) -> Backoff {
+        Backoff::new(
+            Duration::from_secs(initial_secs),
+            Duration::from_secs(max_secs),
+        )
+    }
+
     #[test]
     fn doubles_on_repeated_failure_and_caps() {
-        let mut b = Backoff::new(Duration::from_secs(60), Duration::from_secs(1800));
+        let mut b = backoff(60, 1800);
         b.fail(0);
         assert_eq!(b.remaining(0), Duration::from_secs(60));
         b.fail(60);
@@ -68,7 +75,7 @@ mod tests {
 
     #[test]
     fn succeed_resets_to_initial() {
-        let mut b = Backoff::new(Duration::from_secs(60), Duration::from_secs(1800));
+        let mut b = backoff(60, 1800);
         b.fail(0);
         b.fail(0);
         b.succeed();
@@ -79,7 +86,7 @@ mod tests {
 
     #[test]
     fn ready_reflects_resume_at() {
-        let mut b = Backoff::new(Duration::from_secs(10), Duration::from_secs(60));
+        let mut b = backoff(10, 60);
         assert!(b.ready(0));
         b.fail(100);
         assert!(!b.ready(105));
