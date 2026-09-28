@@ -1,0 +1,20 @@
+[
+  {
+    "method": "remoteControl/status/changed",
+    "params": {
+      "status": "disabled",
+      "serverName": "host",
+      "installationId": "00000000-0000-0000-0000-000000000000",
+      "environmentId": null
+    },
+    "emittedAtMs": 1790626473000
+  },
+  {
+    "method": "account/updated",
+    "params": {
+      "authMode": "chatgpt",
+      "planType": "pro"
+    },
+    "emittedAtMs": 1790626473348
+  }
+]

@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "revision": 1,
+  "generatedAt": 1790596800,
+  "meter": {
+    "bars": [
+      {
+        "provider": "claude",
+        "percent": null,
+        "level": "normal",
+        "windowId": null
+      },
+      {
+        "provider": "codex",
+        "percent": null,
+        "level": "normal",
+        "windowId": null
+      }
+    ],
+    "level": "normal"
+  },
+  "providers": [
+    {
+      "id": "claude",
+      "name": "Claude Code",
+      "state": "loading",
+      "message": null,
+      "plan": null,
+      "windows": [],
+      "credits": null,
+      "breakdown": [],
+      "tokens": null,
+      "accountTokens": null,
+      "updatedAt": null
+    },
+    {
+      "id": "codex",
+      "name": "Codex",
+      "state": "loading",
+      "message": null,
+      "plan": null,
+      "windows": [],
+      "credits": null,
+      "breakdown": [],
+      "tokens": null,
+      "accountTokens": null,
+      "updatedAt": null
+    }
+  ]
+}

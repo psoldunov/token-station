@@ -1,0 +1,268 @@
+{
+  "schemaVersion": 1,
+  "revision": 1,
+  "generatedAt": 1790596800,
+  "meter": {
+    "bars": [
+      {
+        "provider": "claude",
+        "percent": 96.0,
+        "level": "critical",
+        "windowId": "session"
+      },
+      {
+        "provider": "codex",
+        "percent": 88.0,
+        "level": "warning",
+        "windowId": "codex:primary"
+      }
+    ],
+    "level": "critical"
+  },
+  "providers": [
+    {
+      "id": "claude",
+      "name": "Claude Code",
+      "state": "ok",
+      "message": null,
+      "plan": "Max 20x",
+      "windows": [
+        {
+          "id": "session",
+          "label": "Session",
+          "kind": "session",
+          "usedPercent": 96.0,
+          "resetsAt": 1790613600,
+          "windowMinutes": 300,
+          "level": "critical",
+          "source": "oauth",
+          "observedAt": 1790596740
+        },
+        {
+          "id": "weekly_all",
+          "label": "Weekly",
+          "kind": "weekly",
+          "usedPercent": 82.0,
+          "resetsAt": 1790989200,
+          "windowMinutes": 10080,
+          "level": "warning",
+          "source": "oauth",
+          "observedAt": 1790596740
+        },
+        {
+          "id": "weekly_scoped:fable",
+          "label": "Weekly \u00b7 Fable",
+          "kind": "model",
+          "usedPercent": 41.0,
+          "resetsAt": 1790989200,
+          "windowMinutes": 10080,
+          "level": "normal",
+          "source": "oauth",
+          "observedAt": 1790596740
+        }
+      ],
+      "credits": {
+        "label": "Extra usage",
+        "enabled": false,
+        "used": 0.0,
+        "limit": null,
+        "currency": "USD",
+        "percent": null,
+        "detail": "Turned off"
+      },
+      "breakdown": [
+        {
+          "key": "claude_code",
+          "label": "Claude Code",
+          "percent": 97.0
+        },
+        {
+          "key": "chat",
+          "label": "Chats",
+          "percent": 0.0
+        },
+        {
+          "key": "cowork",
+          "label": "Cowork",
+          "percent": 3.0
+        },
+        {
+          "key": "other",
+          "label": "Other",
+          "percent": 0.0
+        }
+      ],
+      "tokens": {
+        "today": {
+          "input": 182340,
+          "output": 96120,
+          "cacheRead": 41220000,
+          "cacheWrite": 1804000,
+          "reasoning": 0,
+          "total": 43302460,
+          "costUsd": 31.42,
+          "unpricedTokens": 0,
+          "requests": 412
+        },
+        "last7Days": {
+          "input": 1402110,
+          "output": 688900,
+          "cacheRead": 302110000,
+          "cacheWrite": 12980000,
+          "reasoning": 0,
+          "total": 317181010,
+          "costUsd": 228.17,
+          "unpricedTokens": 0,
+          "requests": 3120
+        },
+        "byModel": [
+          {
+            "model": "claude-opus-5-5",
+            "input": 1101000,
+            "output": 590000,
+            "cacheRead": 260000000,
+            "cacheWrite": 11000000,
+            "reasoning": 0,
+            "total": 272691000,
+            "costUsd": 201.33,
+            "unpricedTokens": 0,
+            "requests": 2410
+          },
+          {
+            "model": "claude-sonnet-5",
+            "input": 290000,
+            "output": 95000,
+            "cacheRead": 41000000,
+            "cacheWrite": 1900000,
+            "reasoning": 0,
+            "total": 43285000,
+            "costUsd": 24.51,
+            "unpricedTokens": 0,
+            "requests": 650
+          },
+          {
+            "model": "claude-haiku-4-5-20251001",
+            "input": 11110,
+            "output": 3900,
+            "cacheRead": 1110000,
+            "cacheWrite": 80000,
+            "reasoning": 0,
+            "total": 1205010,
+            "costUsd": 2.33,
+            "unpricedTokens": 0,
+            "requests": 60
+          }
+        ],
+        "updatedAt": 1790596770
+      },
+      "accountTokens": null,
+      "updatedAt": 1790596740
+    },
+    {
+      "id": "codex",
+      "name": "Codex",
+      "state": "ok",
+      "message": null,
+      "plan": "Pro",
+      "windows": [
+        {
+          "id": "codex:primary",
+          "label": "Weekly",
+          "kind": "weekly",
+          "usedPercent": 88.0,
+          "resetsAt": 1791119200,
+          "windowMinutes": 10080,
+          "level": "warning",
+          "source": "app-server",
+          "observedAt": 1790596740
+        }
+      ],
+      "credits": {
+        "label": "Credits",
+        "enabled": false,
+        "used": null,
+        "limit": null,
+        "currency": null,
+        "percent": null,
+        "detail": "1 reset credit available"
+      },
+      "breakdown": [],
+      "tokens": {
+        "today": {
+          "input": 52000,
+          "output": 18400,
+          "cacheRead": 610000,
+          "cacheWrite": 0,
+          "reasoning": 9200,
+          "total": 680400,
+          "costUsd": 0.99,
+          "unpricedTokens": 0,
+          "requests": 38
+        },
+        "last7Days": {
+          "input": 410000,
+          "output": 121000,
+          "cacheRead": 4900000,
+          "cacheWrite": 0,
+          "reasoning": 61000,
+          "total": 5431000,
+          "costUsd": 7.42,
+          "unpricedTokens": 0,
+          "requests": 301
+        },
+        "byModel": [
+          {
+            "model": "gpt-5.3-codex",
+            "input": 410000,
+            "output": 121000,
+            "cacheRead": 4900000,
+            "cacheWrite": 0,
+            "reasoning": 61000,
+            "total": 5431000,
+            "costUsd": 7.42,
+            "unpricedTokens": 0,
+            "requests": 301
+          }
+        ],
+        "updatedAt": 1790596770
+      },
+      "accountTokens": {
+        "today": 1204331,
+        "last7Days": 9880120,
+        "lifetime": 4743603614,
+        "daily": [
+          {
+            "date": "2026-09-22",
+            "tokens": 1020000
+          },
+          {
+            "date": "2026-09-23",
+            "tokens": 2300100
+          },
+          {
+            "date": "2026-09-24",
+            "tokens": 0
+          },
+          {
+            "date": "2026-09-25",
+            "tokens": 980223
+          },
+          {
+            "date": "2026-09-26",
+            "tokens": 1775000
+          },
+          {
+            "date": "2026-09-27",
+            "tokens": 2600466
+          },
+          {
+            "date": "2026-09-28",
+            "tokens": 1204331
+          }
+        ],
+        "updatedAt": 1790596740
+      },
+      "updatedAt": 1790596740
+    }
+  ]
+}

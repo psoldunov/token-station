@@ -1,0 +1,9 @@
+{
+  "id": 1,
+  "result": {
+    "userAgent": "token-station/0.157.0 (NixOS 26.11.0; x86_64) xterm-256color (token-station; 0.1.0)",
+    "codexHome": "/home/user/.codex",
+    "platformFamily": "unix",
+    "platformOs": "linux"
+  }
+}
