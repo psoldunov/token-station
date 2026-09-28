@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist gettext-domain="token-station@soldunov.dev">
+  <schema id="org.gnome.shell.extensions.token-station"
+          path="/org/gnome/shell/extensions/token-station/">
+    <key name="show-percent" type="b">
+      <default>false</default>
+      <summary>Show the percentage next to the meter</summary>
+      <description>
+        Print the highest plan percentage as text beside the panel meter.
+        Everything else lives in the Token Station service settings.
+      </description>
+    </key>
+  </schema>
+</schemalist>

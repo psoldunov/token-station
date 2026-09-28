@@ -1,38 +1,17 @@
-//! Codex usage provider (stub; replaced by the real implementation).
+//! Codex usage provider: talks to `codex app-server` over stdio, falls back to
+//! the ChatGPT usage HTTP endpoint, and scans local rollout logs for token
+//! counts.
 
-use async_trait::async_trait;
-use ts_core::config::CodexConfig;
-use ts_core::pricing::SharedPricing;
-use ts_core::{Provider, ProviderId, ProviderSnapshot, ProviderState, RefreshOutcome};
+mod account_tokens;
+mod app_server;
+mod auth;
+mod backoff;
+mod dto;
+mod env;
+mod http_fallback;
+mod provider;
+mod rollouts;
+mod windows;
 
-pub struct CodexProvider {
-    _config: CodexConfig,
-    _pricing: SharedPricing,
-}
-
-impl CodexProvider {
-    /// Provider using the real process environment (`HOME`, `CODEX_HOME`, `PATH`).
-    pub fn new(config: CodexConfig, pricing: SharedPricing) -> Self {
-        CodexProvider {
-            _config: config,
-            _pricing: pricing,
-        }
-    }
-}
-
-#[async_trait]
-impl Provider for CodexProvider {
-    fn id(&self) -> ProviderId {
-        ProviderId::Codex
-    }
-
-    async fn refresh_limits(&self, _force: bool) -> RefreshOutcome {
-        RefreshOutcome::Skipped("not implemented".into())
-    }
-
-    async fn refresh_tokens(&self) {}
-
-    fn snapshot(&self, _now: i64) -> ProviderSnapshot {
-        ProviderSnapshot::empty(ProviderId::Codex, ProviderState::Loading)
-    }
-}
+pub use env::CodexEnv;
+pub use provider::CodexProvider;

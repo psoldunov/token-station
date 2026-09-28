@@ -1,0 +1,104 @@
+/* Token Station.
+ *
+ * Colours come from the Shell theme wherever there is one. The two exceptions
+ * are the warning and critical accents, which mirror the GNOME palette
+ * (yellow 5 and red 4) because St has no portable accent keyword before
+ * GNOME 47. */
+
+.token-station-panel-box {
+  spacing: 6px;
+}
+
+.token-station-meter {
+  -token-station-warning-color: #e5a50a;
+  -token-station-critical-color: #e01b24;
+}
+
+.token-station-panel-percent {
+  font-feature-settings: "tnum";
+  font-size: 0.9em;
+}
+
+.token-station-menu {
+  min-width: 22em;
+}
+
+/* Rows that only present information: no hover, tighter than a real item. */
+.token-station-header-item,
+.token-station-window-item,
+.token-station-detail-item,
+.token-station-state-item,
+.token-station-chart-item,
+.token-station-model-item,
+.token-station-footer-item,
+.token-station-placeholder-item {
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+
+.token-station-header-item {
+  padding-top: 8px;
+}
+
+.token-station-provider {
+  font-weight: bold;
+}
+
+.token-station-plan,
+.token-station-dim {
+  color: rgba(146, 146, 146, 1);
+  font-size: 0.9em;
+}
+
+.token-station-footnote {
+  color: rgba(146, 146, 146, 1);
+  font-size: 0.85em;
+}
+
+.token-station-placeholder {
+  padding-bottom: 2px;
+}
+
+.token-station-state-icon {
+  icon-size: 16px;
+  padding-right: 8px;
+}
+
+.token-station-state-item.token-station-warning .token-station-state-icon {
+  color: #e5a50a;
+}
+
+/* Native level bar. BarLevel reads every one of these from its theme node. */
+.token-station-level {
+  height: 4px;
+  -barlevel-height: 4px;
+  -barlevel-background-color: rgba(146, 146, 146, 0.35);
+  -barlevel-active-background-color: #3584e4;
+  -barlevel-overdrive-color: #e01b24;
+  -barlevel-overdrive-separator-width: 1px;
+}
+
+.token-station-level.token-station-warning {
+  -barlevel-active-background-color: #e5a50a;
+}
+
+.token-station-level.token-station-critical {
+  -barlevel-active-background-color: #e01b24;
+}
+
+/* The vertical stack inside an information row. */
+.token-station-stack {
+  spacing: 4px;
+}
+
+.token-station-sparkline {
+  height: 32px;
+}
+
+.token-station-sparkline.token-station-warning {
+  color: #e5a50a;
+}
+
+.token-station-sparkline.token-station-critical {
+  color: #e01b24;
+}

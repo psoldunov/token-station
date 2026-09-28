@@ -1,0 +1,28 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Email": "philipp@theswisscheese.com",
+                "Name": "Philipp Soldunov"
+            }
+        ],
+        "BugReportUrl": "https://github.com/psoldunov/token-station/issues",
+        "Category": "System Information",
+        "Description": "Claude Code and Codex plan usage at a glance",
+        "EnabledByDefault": true,
+        "FormFactors": [
+            "desktop"
+        ],
+        "Icon": "dev.soldunov.TokenStation",
+        "Id": "dev.soldunov.tokenstation",
+        "License": "MIT",
+        "Name": "Token Station",
+        "Version": "0.1.0",
+        "Website": "https://github.com/psoldunov/token-station"
+    },
+    "Keywords": "Claude;Codex;Tokens;Usage;Quota;AI;",
+    "X-Plasma-API-Minimum-Version": "6.4",
+    "X-Plasma-NotificationArea": "true",
+    "X-Plasma-NotificationAreaCategory": "SystemServices"
+}

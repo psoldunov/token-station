@@ -9,3 +9,15 @@ rust-version.workspace = true
 [dependencies]
 ts-core.workspace = true
 async-trait.workspace = true
+chrono.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+reqwest.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", "time", "fs", "sync", "signal", "io-util"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+wiremock.workspace = true

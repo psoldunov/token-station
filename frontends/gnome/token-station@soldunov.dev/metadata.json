@@ -1,0 +1,8 @@
+{
+  "uuid": "token-station@soldunov.dev",
+  "name": "Token Station",
+  "description": "Claude Code and Codex plan usage in the top bar. A mini meter shows how much of each plan window is spent; the menu breaks it down per window, per model and over time. Reads everything from the Token Station daemon over D-Bus.",
+  "shell-version": ["46", "47", "48", "49", "50"],
+  "settings-schema": "org.gnome.shell.extensions.token-station",
+  "url": "https://github.com/psoldunov/token-station"
+}

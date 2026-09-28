@@ -1,0 +1,16 @@
+[Unit]
+Description=Token Station usage daemon (Claude Code and Codex plan usage)
+Documentation=https://github.com/psoldunov/token-station
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=dbus
+BusName=dev.soldunov.TokenStation
+ExecStart=@bindir@/token-station daemon
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=graphical-session.target

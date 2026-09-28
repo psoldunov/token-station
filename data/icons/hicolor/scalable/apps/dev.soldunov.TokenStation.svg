@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3a3f4b"/>
+      <stop offset="1" stop-color="#23262e"/>
+    </linearGradient>
+    <linearGradient id="claude" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f0a283"/>
+      <stop offset="1" stop-color="#d97757"/>
+    </linearGradient>
+    <linearGradient id="codex" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4fd1ae"/>
+      <stop offset="1" stop-color="#10a37f"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#bg)"/>
+  <rect x="8.5" y="8.5" width="111" height="111" rx="25.5" fill="none" stroke="#ffffff" stroke-opacity=".08"/>
+  <g fill="#ffffff" fill-opacity=".10">
+    <rect x="30" y="24" width="28" height="80" rx="9"/>
+    <rect x="70" y="24" width="28" height="80" rx="9"/>
+  </g>
+  <rect x="30" y="52" width="28" height="52" rx="9" fill="url(#claude)"/>
+  <rect x="70" y="72" width="28" height="32" rx="9" fill="url(#codex)"/>
+  <g stroke="#ffffff" stroke-opacity=".22" stroke-width="2" stroke-linecap="round">
+    <path d="M24 44h4M24 64h4M24 84h4"/>
+  </g>
+</svg>
