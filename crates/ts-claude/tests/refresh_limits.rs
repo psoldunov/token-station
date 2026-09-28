@@ -32,6 +32,13 @@ async fn mock_oauth_usage(response: ResponseTemplate) -> MockServer {
     server
 }
 
+/// Build a provider against `server` and run a single `refresh_limits(false)`.
+async fn refresh_once(server: &MockServer) -> (RefreshOutcome, ClaudeProvider, support::Fixture) {
+    let (provider, fixture) = provider_for(server);
+    let outcome = provider.refresh_limits(false).await;
+    (outcome, provider, fixture)
+}
+
 #[tokio::test]
 async fn success_updates_windows_credits_and_breakdown() {
     let server = MockServer::start().await;
@@ -68,18 +75,46 @@ async fn unauthorized_marks_skipped_with_expired_message() {
     }
 }
 
-#[tokio::test]
-async fn forbidden_disables_endpoint_for_process() {
-    let server = mock_oauth_usage(ResponseTemplate::new(403)).await;
-    let (provider, _fixture) = provider_for(&server);
-    let outcome = provider.refresh_limits(false).await;
-    assert!(matches!(outcome, RefreshOutcome::Failed(_)));
+/// What a failing status code should additionally do, beyond reporting
+/// `RefreshOutcome::Failed`.
+enum FailureFollowUp {
+    /// A second call must not hit the network again: it should come back
+    /// `Skipped`, and wiremock would panic on an unconfigured extra request
+    /// if the endpoint were still being hit.
+    SecondCallIsSkipped,
+    /// The snapshot must keep no stale data and report `ProviderState::Error`.
+    SnapshotHasNoDataAndErrors,
+}
 
-    // Second call does not hit the network again: still Failed/Skipped, and
-    // wiremock would panic on an unexpected extra request if it happened
-    // (no additional Mock configured), so reaching here at all proves it.
-    let second = provider.refresh_limits(true).await;
-    assert!(matches!(second, RefreshOutcome::Skipped(_)));
+#[tokio::test]
+async fn failing_status_codes_report_failed_and_follow_up_correctly() {
+    let cases = [
+        (403, FailureFollowUp::SecondCallIsSkipped),
+        (500, FailureFollowUp::SnapshotHasNoDataAndErrors),
+    ];
+    for (status, follow_up) in cases {
+        let server = mock_oauth_usage(ResponseTemplate::new(status)).await;
+        let (outcome, provider, _fixture) = refresh_once(&server).await;
+        assert!(
+            matches!(outcome, RefreshOutcome::Failed(_)),
+            "status {status}"
+        );
+
+        match follow_up {
+            FailureFollowUp::SecondCallIsSkipped => {
+                let second = provider.refresh_limits(true).await;
+                assert!(
+                    matches!(second, RefreshOutcome::Skipped(_)),
+                    "status {status}"
+                );
+            }
+            FailureFollowUp::SnapshotHasNoDataAndErrors => {
+                let snap = provider.snapshot(0);
+                assert_eq!(snap.state, ProviderState::Error, "status {status}");
+                assert!(snap.windows.is_empty(), "status {status}");
+            }
+        }
+    }
 }
 
 #[tokio::test]
@@ -92,15 +127,4 @@ async fn rate_limited_backs_off_using_retry_after() {
 
     let next = provider.next_limits_refresh(0, std::time::Duration::from_secs(60));
     assert!(next.as_secs() >= 100, "expected long backoff, got {next:?}");
-}
-
-#[tokio::test]
-async fn server_error_keeps_no_data_and_reports_failed() {
-    let server = mock_oauth_usage(ResponseTemplate::new(500)).await;
-    let (provider, _fixture) = provider_for(&server);
-    let outcome = provider.refresh_limits(false).await;
-    assert!(matches!(outcome, RefreshOutcome::Failed(_)));
-    let snap = provider.snapshot(0);
-    assert_eq!(snap.state, ProviderState::Error);
-    assert!(snap.windows.is_empty());
 }

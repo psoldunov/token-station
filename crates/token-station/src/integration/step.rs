@@ -244,6 +244,20 @@ mod tests {
         execute(steps, manifest, Previous::default()).expect("the plan runs")
     }
 
+    /// Create `base/sub` and write each `(relative_path, contents)` pair into it.
+    fn dir_with_files(base: &Path, sub: &str, files: &[(&str, &str)]) -> PathBuf {
+        let dir = base.join(sub);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, contents) in files {
+            let file = dir.join(name);
+            if let Some(parent) = file.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(file, contents).unwrap();
+        }
+        dir
+    }
+
     #[test]
     fn a_copied_tree_is_recorded_as_a_directory_we_own() {
         let dir = tempfile::tempdir().unwrap();
@@ -273,12 +287,8 @@ mod tests {
     #[test]
     fn copying_again_removes_files_the_old_version_left() {
         let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("payload");
-        std::fs::create_dir_all(&source).unwrap();
-        std::fs::write(source.join("new.qml"), "new").unwrap();
-        let target = dir.path().join("target");
-        std::fs::create_dir_all(&target).unwrap();
-        std::fs::write(target.join("stale.qml"), "old").unwrap();
+        let source = dir_with_files(dir.path(), "payload", &[("new.qml", "new")]);
+        let target = dir_with_files(dir.path(), "target", &[("stale.qml", "old")]);
 
         copy_tree(&source, &target).unwrap();
         assert!(target.join("new.qml").exists());
@@ -434,12 +444,12 @@ mod tests {
     #[test]
     fn a_copied_tree_over_a_stranger_is_left_alone() {
         let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("payload");
-        std::fs::create_dir_all(&source).unwrap();
-        std::fs::write(source.join("metadata.json"), "{}").unwrap();
-        let target = dir.path().join("plasmoids/dev.soldunov.tokenstation");
-        std::fs::create_dir_all(&target).unwrap();
-        std::fs::write(target.join("theirs.qml"), "mine").unwrap();
+        let source = dir_with_files(dir.path(), "payload", &[("metadata.json", "{}")]);
+        let target = dir_with_files(
+            dir.path(),
+            "plasmoids/dev.soldunov.tokenstation",
+            &[("theirs.qml", "mine")],
+        );
 
         let mut manifest = manifest();
         let outcome = fresh(

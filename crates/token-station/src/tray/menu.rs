@@ -129,29 +129,6 @@ mod tests {
     }
 
     #[test]
-    fn a_healthy_snapshot_lists_every_window_and_both_summaries() {
-        let text = menu_text(Some(&fixture("snapshot-ok")), NOW);
-        assert_eq!(
-            text.usage,
-            vec![
-                "Claude Code · Max 20x",
-                "    Session · 34% · resets in 4h 40m",
-                "    Weekly · 15% · resets in 4d 13h",
-                "    Weekly · Fable · 0% · resets in 4d 13h",
-                "Codex · Pro",
-                "    Weekly · 12% · resets in 6d 1h",
-            ]
-        );
-        assert_eq!(
-            text.tokens,
-            vec![
-                "Claude Code · today 43.3M tokens · $31.42 · 7 days 317.2M tokens · $228.17",
-                "Codex · today 680.4k tokens · $0.99 · 7 days 5.4M tokens · $7.42",
-            ]
-        );
-    }
-
-    #[test]
     fn the_tooltip_shows_the_most_constrained_window_per_provider() {
         assert_eq!(
             tooltip_description(Some(&fixture("snapshot-ok")), NOW),
@@ -163,29 +140,98 @@ mod tests {
         );
     }
 
-    #[test]
-    fn broken_providers_say_why_instead_of_showing_numbers() {
-        let text = menu_text(Some(&fixture("snapshot-not-installed")), NOW);
-        assert!(
-            text.usage
-                .contains(&"Codex · not installed — Codex CLI not found.".to_string())
-        );
-        assert_eq!(
-            tooltip_description(Some(&fixture("snapshot-stale-auth")), NOW),
-            "Claude Code · Session 34% · resets in 4h 40m\n\
-             Codex · not signed in — Codex is not signed in. Run `codex login`."
-        );
+    /// One fixture rendered through `menu_text`/`tooltip_description`, with only the
+    /// fields a given case cares about checked.
+    #[derive(Default)]
+    struct MenuTextCase {
+        name: &'static str,
+        fixture: &'static str,
+        usage_exact: Option<Vec<&'static str>>,
+        usage_contains: Option<&'static str>,
+        tokens_exact: Option<Vec<&'static str>>,
+        tokens_empty: bool,
+        tooltip: Option<&'static str>,
     }
 
     #[test]
-    fn a_loading_snapshot_has_headings_but_no_windows() {
-        let text = menu_text(Some(&fixture("snapshot-loading")), NOW);
-        assert_eq!(text.usage, vec!["Claude Code · loading", "Codex · loading"]);
-        assert!(text.tokens.is_empty());
-        assert_eq!(
-            tooltip_description(Some(&fixture("snapshot-loading")), NOW),
-            "Claude Code · loading\nCodex · loading"
-        );
+    fn menu_text_and_tooltip_render_each_fixture_as_expected() {
+        let cases = [
+            MenuTextCase {
+                name: "a healthy snapshot lists every window and both summaries",
+                fixture: "snapshot-ok",
+                usage_exact: Some(vec![
+                    "Claude Code · Max 20x",
+                    "    Session · 34% · resets in 4h 40m",
+                    "    Weekly · 15% · resets in 4d 13h",
+                    "    Weekly · Fable · 0% · resets in 4d 13h",
+                    "Codex · Pro",
+                    "    Weekly · 12% · resets in 6d 1h",
+                ]),
+                tokens_exact: Some(vec![
+                    "Claude Code · today 43.3M tokens · $31.42 · 7 days 317.2M tokens · $228.17",
+                    "Codex · today 680.4k tokens · $0.99 · 7 days 5.4M tokens · $7.42",
+                ]),
+                ..Default::default()
+            },
+            MenuTextCase {
+                name: "a loading snapshot has headings but no windows",
+                fixture: "snapshot-loading",
+                usage_exact: Some(vec!["Claude Code · loading", "Codex · loading"]),
+                tokens_empty: true,
+                tooltip: Some("Claude Code · loading\nCodex · loading"),
+                ..Default::default()
+            },
+            MenuTextCase {
+                name: "a not-installed provider says why instead of showing numbers",
+                fixture: "snapshot-not-installed",
+                usage_contains: Some("Codex · not installed — Codex CLI not found."),
+                ..Default::default()
+            },
+            MenuTextCase {
+                name: "a stale-auth tooltip explains why",
+                fixture: "snapshot-stale-auth",
+                tooltip: Some(
+                    "Claude Code · Session 34% · resets in 4h 40m\n\
+                     Codex · not signed in — Codex is not signed in. Run `codex login`.",
+                ),
+                ..Default::default()
+            },
+        ];
+
+        for case in cases {
+            let snapshot = fixture(case.fixture);
+            let text = menu_text(Some(&snapshot), NOW);
+            if let Some(expected) = &case.usage_exact {
+                let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
+                assert_eq!(text.usage, expected, "{}: usage", case.name);
+            }
+            if let Some(needle) = case.usage_contains {
+                assert!(
+                    text.usage.contains(&needle.to_string()),
+                    "{}: usage should contain {needle:?}",
+                    case.name
+                );
+            }
+            if let Some(expected) = &case.tokens_exact {
+                let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
+                assert_eq!(text.tokens, expected, "{}: tokens", case.name);
+            }
+            if case.tokens_empty {
+                assert!(
+                    text.tokens.is_empty(),
+                    "{}: tokens should be empty",
+                    case.name
+                );
+            }
+            if let Some(expected) = case.tooltip {
+                assert_eq!(
+                    tooltip_description(Some(&snapshot), NOW),
+                    expected,
+                    "{}: tooltip",
+                    case.name
+                );
+            }
+        }
     }
 
     #[test]

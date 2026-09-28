@@ -75,13 +75,62 @@ fn statusline_wrap_passes_stdin_through_untouched() {
     assert_eq!(out.stdout, SAMPLE);
 }
 
+/// A simple invocation of the binary: given `args`/`stdin`, the exit code and
+/// (optionally) the stdout it should produce.
+struct SimpleCase {
+    name: &'static str,
+    args: &'static [&'static str],
+    stdin: &'static str,
+    expect_code: i32,
+    stdout_trim_eq: Option<&'static str>,
+    stdout_contains: Option<&'static str>,
+}
+
 #[test]
-fn statusline_survives_empty_and_unparsable_input() {
-    let dir = tempfile::tempdir().unwrap();
-    assert_eq!(run(&["statusline"], "", dir.path()).code, 0);
-    let out = run(&["statusline"], "not json", dir.path());
-    assert_eq!(out.code, 0);
-    assert_eq!(out.stdout.trim(), "");
+fn statusline_edge_cases_and_help_exit_cleanly() {
+    let cases = [
+        SimpleCase {
+            name: "empty stdin still exits cleanly",
+            args: &["statusline"],
+            stdin: "",
+            expect_code: 0,
+            stdout_trim_eq: None,
+            stdout_contains: None,
+        },
+        SimpleCase {
+            name: "unparsable stdin still exits cleanly",
+            args: &["statusline"],
+            stdin: "not json",
+            expect_code: 0,
+            stdout_trim_eq: Some(""),
+            stdout_contains: None,
+        },
+        SimpleCase {
+            name: "help prints usage",
+            args: &["--help"],
+            stdin: "",
+            expect_code: 0,
+            stdout_trim_eq: None,
+            stdout_contains: Some("statusline"),
+        },
+    ];
+
+    for case in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let out = run(case.args, case.stdin, dir.path());
+        assert_eq!(out.code, case.expect_code, "{}: exit code", case.name);
+        if let Some(expected) = case.stdout_trim_eq {
+            assert_eq!(out.stdout.trim(), expected, "{}: stdout", case.name);
+        }
+        if let Some(needle) = case.stdout_contains {
+            assert!(
+                out.stdout.contains(needle),
+                "{}: stdout should contain {needle:?}\n{}",
+                case.name,
+                out.stdout
+            );
+        }
+    }
 }
 
 #[test]
@@ -182,14 +231,6 @@ fn setup_for_kde_without_a_payload_fails_clearly() {
 fn refresh_without_a_daemon_fails_cleanly() {
     let dir = tempfile::tempdir().unwrap();
     assert_eq!(run(&["refresh"], "", dir.path()).code, 1);
-}
-
-#[test]
-fn help_and_version_work() {
-    let dir = tempfile::tempdir().unwrap();
-    let help = run(&["--help"], "", dir.path());
-    assert_eq!(help.code, 0);
-    assert!(help.stdout.contains("statusline"), "{}", help.stdout);
 }
 
 #[test]

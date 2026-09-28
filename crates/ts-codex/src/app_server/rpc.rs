@@ -226,20 +226,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn matches_response_by_id_amid_notifications() {
-        let (client, server) = client_over_duplex(vec![]);
-        tokio::spawn(respond_after_request(
-            server,
-            &[
-                b"{\"method\":\"account/updated\",\"params\":{}}",
-                b"{\"id\":1,\"result\":{\"ok\":true}}",
-            ],
-        ));
-        let result = client
-            .call("ping", json!({}), Duration::from_secs(2))
-            .await
-            .unwrap();
-        assert_eq!(result, json!({"ok": true}));
+    async fn call_resolves_from_the_matching_wire_response() {
+        struct Case {
+            name: &'static str,
+            method: &'static str,
+            response_lines: &'static [&'static [u8]],
+            expect: Result<Value, RpcCallError>,
+        }
+        let cases = [
+            Case {
+                name: "matches the response by id amid notifications",
+                method: "ping",
+                response_lines: &[
+                    b"{\"method\":\"account/updated\",\"params\":{}}",
+                    b"{\"id\":1,\"result\":{\"ok\":true}}",
+                ],
+                expect: Ok(json!({"ok": true})),
+            },
+            Case {
+                name: "maps a remote error response",
+                method: "bogus",
+                response_lines: &[
+                    b"{\"id\":1,\"error\":{\"code\":-32600,\"message\":\"unknown variant\"}}",
+                ],
+                expect: Err(RpcCallError::Remote(-32600, "unknown variant".into())),
+            },
+        ];
+
+        for case in cases {
+            let (client, server) = client_over_duplex(vec![]);
+            tokio::spawn(respond_after_request(server, case.response_lines));
+            let result = client
+                .call(case.method, json!({}), Duration::from_secs(2))
+                .await;
+            assert_eq!(result, case.expect, "{}", case.name);
+        }
     }
 
     #[tokio::test]
@@ -256,20 +277,6 @@ mod tests {
         let value: Value = serde_json::from_str(reply.trim()).unwrap();
         assert_eq!(value["id"], 42);
         assert_eq!(value["error"]["code"], -32601);
-    }
-
-    #[tokio::test]
-    async fn maps_remote_error_response() {
-        let (client, server) = client_over_duplex(vec![]);
-        tokio::spawn(respond_after_request(
-            server,
-            &[b"{\"id\":1,\"error\":{\"code\":-32600,\"message\":\"unknown variant\"}}"],
-        ));
-        let err = client
-            .call("bogus", json!({}), Duration::from_secs(2))
-            .await
-            .unwrap_err();
-        assert_eq!(err, RpcCallError::Remote(-32600, "unknown variant".into()));
     }
 
     #[tokio::test]
