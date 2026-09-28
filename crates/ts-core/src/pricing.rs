@@ -164,6 +164,14 @@ fn strip_date_suffix(model: &str) -> String {
     }
 }
 
+/// Pricing shared between the daemon (which refreshes it) and providers.
+pub type SharedPricing = std::sync::Arc<std::sync::RwLock<Pricing>>;
+
+/// A [`SharedPricing`] holding the bundled table.
+pub fn shared_bundled() -> SharedPricing {
+    std::sync::Arc::new(std::sync::RwLock::new(Pricing::bundled()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

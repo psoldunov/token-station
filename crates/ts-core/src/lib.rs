@@ -7,6 +7,7 @@
 pub mod alerts;
 pub mod assemble;
 pub mod config;
+pub mod discovery;
 pub mod meter;
 pub mod pricing;
 pub mod provider;
