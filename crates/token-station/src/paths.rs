@@ -17,6 +17,8 @@ pub struct Env {
     pub state_home: Option<String>,
     pub cache_home: Option<String>,
     pub runtime_dir: Option<String>,
+    /// `$XDG_DATA_HOME`; where `setup` drops applets, extensions and icons.
+    pub data_home: Option<String>,
 }
 
 impl Env {
@@ -29,6 +31,7 @@ impl Env {
             state_home: var("XDG_STATE_HOME"),
             cache_home: var("XDG_CACHE_HOME"),
             runtime_dir: var("XDG_RUNTIME_DIR"),
+            data_home: var("XDG_DATA_HOME"),
         }
     }
 
@@ -41,7 +44,28 @@ impl Env {
             state_home: var("XDG_STATE_HOME"),
             cache_home: var("XDG_CACHE_HOME"),
             runtime_dir: var("XDG_RUNTIME_DIR"),
+            data_home: var("XDG_DATA_HOME"),
         }
+    }
+
+    /// `$HOME`, or `/tmp` when the environment has none.
+    pub fn home_dir(&self) -> PathBuf {
+        home_of(self)
+    }
+
+    /// `$XDG_DATA_HOME`, defaulting to `~/.local/share`.
+    pub fn data_home(&self) -> PathBuf {
+        root(self.data_home.as_ref(), &home_of(self), ".local/share")
+    }
+
+    /// `$XDG_CONFIG_HOME`, defaulting to `~/.config`.
+    pub fn config_home(&self) -> PathBuf {
+        root(self.config_home.as_ref(), &home_of(self), ".config")
+    }
+
+    /// `$XDG_STATE_HOME`, defaulting to `~/.local/state`.
+    pub fn state_home(&self) -> PathBuf {
+        root(self.state_home.as_ref(), &home_of(self), ".local/state")
     }
 }
 
@@ -164,6 +188,25 @@ mod tests {
             p.statusline_drop(),
             Path::new("/home/u/.local/state/token-station/run/claude-statusline.json")
         );
+    }
+
+    #[test]
+    fn xdg_roots_have_spec_defaults() {
+        let explicit = env(&[
+            ("HOME", "/home/u"),
+            ("XDG_DATA_HOME", "/da"),
+            ("XDG_CONFIG_HOME", "/cfg"),
+            ("XDG_STATE_HOME", "/st"),
+        ]);
+        assert_eq!(explicit.data_home(), Path::new("/da"));
+        assert_eq!(explicit.config_home(), Path::new("/cfg"));
+        assert_eq!(explicit.state_home(), Path::new("/st"));
+
+        let bare = env(&[("HOME", "/home/u")]);
+        assert_eq!(bare.data_home(), Path::new("/home/u/.local/share"));
+        assert_eq!(bare.config_home(), Path::new("/home/u/.config"));
+        assert_eq!(bare.state_home(), Path::new("/home/u/.local/state"));
+        assert_eq!(bare.home_dir(), Path::new("/home/u"));
     }
 
     #[test]

@@ -116,6 +116,7 @@ fn harness(percent: f64) -> Harness {
         state_home: Some(format!("{root}/state")),
         cache_home: Some(format!("{root}/cache")),
         runtime_dir: Some(format!("{root}/run")),
+        data_home: Some(format!("{root}/data")),
     });
 
     let claude = FakeProvider::new(ProviderId::Claude, percent);

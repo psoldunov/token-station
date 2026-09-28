@@ -2,27 +2,28 @@
 
 use std::process::ExitCode;
 
-use clap::Parser;
-use token_station::cli::{ALREADY_RUNNING_EXIT, Cli, Command, NOT_IMPLEMENTED_EXIT};
+use clap::{CommandFactory, Parser};
+use token_station::cli::{ALREADY_RUNNING_EXIT, Cli, Command, SetupArgs};
+use token_station::clock::system_clock;
 use token_station::daemon::{DaemonOptions, run as daemon};
-use token_station::paths::Paths;
-use token_station::{init_logging, status, statusline};
+use token_station::integration::{self, Session};
+use token_station::paths::{Env, Paths};
+use token_station::{init_logging, status, statusline, tray};
 
 fn main() -> ExitCode {
     init_logging();
     let cli = Cli::parse();
-
-    if let Some(name) = cli.command.pending() {
-        eprintln!("`token-station {name}` is not implemented yet");
-        return ExitCode::from(NOT_IMPLEMENTED_EXIT as u8);
-    }
-
     let paths = Paths::current();
+
     let result = match cli.command {
-        Command::Statusline { wrap } => {
+        // Double-clicking the AppImage should install it; a bare shell call should explain itself.
+        None => default_command(),
+        Some(Command::Statusline { wrap }) => {
             statusline::run(wrap.as_deref(), &paths).map_err(anyhow::Error::from)
         }
-        other => in_runtime(other, paths),
+        Some(Command::Setup(args)) => setup(&args),
+        Some(Command::Uninstall) => uninstall(),
+        Some(other) => in_runtime(other, paths),
     };
 
     match result {
@@ -34,7 +35,35 @@ fn main() -> ExitCode {
     }
 }
 
-/// Everything except `statusline` needs the async runtime.
+/// With no subcommand: set up when launched as an AppImage, else print the help.
+fn default_command() -> anyhow::Result<()> {
+    let session = Session::current();
+    if session.appimage.is_some() {
+        return setup(&SetupArgs::default());
+    }
+    Cli::command().print_help()?;
+    println!();
+    Ok(())
+}
+
+fn setup(args: &SetupArgs) -> anyhow::Result<()> {
+    let summary = integration::setup(
+        &args.options(),
+        &Env::current(),
+        &Session::current(),
+        system_clock()(),
+    )?;
+    println!("{summary}");
+    Ok(())
+}
+
+fn uninstall() -> anyhow::Result<()> {
+    let summary = integration::uninstall(&Env::current(), &Session::current())?;
+    println!("{summary}");
+    Ok(())
+}
+
+/// Everything that needs the async runtime.
 fn in_runtime(command: Command, paths: Paths) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -46,9 +75,8 @@ fn in_runtime(command: Command, paths: Paths) -> anyhow::Result<()> {
             }
             Command::Status { json } => status::status(&paths, json).await,
             Command::Refresh => status::refresh().await,
-            Command::Statusline { .. } | Command::Tray | Command::Setup | Command::Uninstall => {
-                Ok(())
-            }
+            Command::Tray => tray::run().await,
+            Command::Statusline { .. } | Command::Setup(_) | Command::Uninstall => Ok(()),
         }
     })
 }

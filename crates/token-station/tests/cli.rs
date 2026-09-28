@@ -18,7 +18,13 @@ struct Run {
 
 /// Run the binary with an isolated environment and no session bus.
 fn run(args: &[&str], stdin: &str, home: &std::path::Path) -> Run {
-    let mut child = Command::new(binary())
+    run_with(args, stdin, home, &[])
+}
+
+/// As [`run`], with extra environment variables.
+fn run_with(args: &[&str], stdin: &str, home: &std::path::Path, extra: &[(&str, &str)]) -> Run {
+    let mut command = Command::new(binary());
+    command
         .args(args)
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
@@ -27,13 +33,16 @@ fn run(args: &[&str], stdin: &str, home: &std::path::Path) -> Run {
         .env("XDG_CONFIG_HOME", home.join("config"))
         .env("XDG_STATE_HOME", home.join("state"))
         .env("XDG_CACHE_HOME", home.join("cache"))
+        .env("XDG_DATA_HOME", home.join("data"))
         // No bus: the statusline command must fall back to the drop box.
         .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent/ts-test")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("binary runs");
+        .stderr(Stdio::null());
+    for (key, value) in extra {
+        command.env(key, value);
+    }
+    let mut child = command.spawn().expect("binary runs");
     child
         .stdin
         .take()
@@ -76,11 +85,97 @@ fn statusline_survives_empty_and_unparsable_input() {
 }
 
 #[test]
-fn unfinished_subcommands_exit_with_two() {
+fn no_subcommand_outside_an_appimage_prints_the_help() {
     let dir = tempfile::tempdir().unwrap();
-    for name in ["tray", "setup", "uninstall"] {
-        assert_eq!(run(&[name], "", dir.path()).code, 2, "{name}");
-    }
+    let out = run(&[], "", dir.path());
+    assert_eq!(out.code, 0);
+    assert!(
+        out.stdout.contains("Usage: token-station"),
+        "{}",
+        out.stdout
+    );
+    assert!(out.stdout.contains("setup"), "{}", out.stdout);
+    // Printing help installs nothing.
+    assert!(!dir.path().join("state/token-station").exists());
+}
+
+#[test]
+fn no_subcommand_inside_an_appimage_runs_setup() {
+    let dir = tempfile::tempdir().unwrap();
+    // `/bin/true` stands in for the AppImage: setup starts it as the tray.
+    // An empty PATH keeps the test away from the real `systemctl --user`.
+    let out = run_with(
+        &[],
+        "",
+        dir.path(),
+        &[("APPIMAGE", "/bin/true"), ("PATH", "")],
+    );
+    assert_eq!(out.code, 0, "{}", out.stdout);
+    assert!(
+        out.stdout.contains("Token Station is set up"),
+        "{}",
+        out.stdout
+    );
+
+    let manifest = dir.path().join("state/token-station/install-manifest.json");
+    let recorded: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap()).unwrap();
+    assert_eq!(recorded["exec"], "/bin/true");
+    assert_eq!(recorded["desktop"], "other");
+    assert!(
+        dir.path()
+            .join("data/dbus-1/services/dev.soldunov.TokenStation.service")
+            .exists()
+    );
+    assert!(
+        dir.path()
+            .join("config/autostart/dev.soldunov.TokenStation.Tray.desktop")
+            .exists()
+    );
+
+    // And `uninstall` takes it all back out again.
+    let gone = run_with(&["uninstall"], "", dir.path(), &[("PATH", "")]);
+    assert_eq!(gone.code, 0, "{}", gone.stdout);
+    assert!(!manifest.exists());
+    assert!(
+        !dir.path()
+            .join("config/autostart")
+            .join("dev.soldunov.TokenStation.Tray.desktop")
+            .exists()
+    );
+}
+
+#[test]
+fn a_dry_run_prints_the_plan_and_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = run_with(
+        &["setup", "--desktop", "other", "--dry-run"],
+        "",
+        dir.path(),
+        &[("PATH", "")],
+    );
+    assert_eq!(out.code, 0, "{}", out.stdout);
+    assert!(out.stdout.contains("dry run"), "{}", out.stdout);
+    assert!(
+        out.stdout.contains("token-station.service"),
+        "{}",
+        out.stdout
+    );
+    assert!(!dir.path().join("data").exists());
+    assert!(!dir.path().join("config").exists());
+}
+
+#[test]
+fn setup_for_kde_without_a_payload_fails_clearly() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = run_with(
+        &["setup", "--desktop", "kde"],
+        "",
+        dir.path(),
+        &[("PATH", "")],
+    );
+    assert_eq!(out.code, 1);
+    assert!(!dir.path().join("data/plasma").exists());
 }
 
 #[test]

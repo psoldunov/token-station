@@ -53,7 +53,8 @@ pub fn render(snapshot: &Snapshot, now: i64) -> String {
     lines.join("\n")
 }
 
-fn state_text(state: ProviderState, message: Option<&str>) -> String {
+/// Human wording for a non-ok provider state, with its message appended.
+pub fn state_text(state: ProviderState, message: Option<&str>) -> String {
     let label = match state {
         ProviderState::Loading => "loading",
         ProviderState::Unauthenticated => "not signed in",
@@ -69,7 +70,8 @@ fn state_text(state: ProviderState, message: Option<&str>) -> String {
     }
 }
 
-fn reset_suffix(resets_at: Option<i64>, now: i64) -> String {
+/// ` · resets in 2h 14m`, or the empty string when the window never resets.
+pub fn reset_suffix(resets_at: Option<i64>, now: i64) -> String {
     match resets_at.map(|t| t - now) {
         Some(remaining) if remaining > 0 => {
             format!(" · resets in {}", compact_duration(remaining))
@@ -78,7 +80,8 @@ fn reset_suffix(resets_at: Option<i64>, now: i64) -> String {
     }
 }
 
-fn totals_text(totals: &TokenTotals) -> String {
+/// `317.2M tokens · $228.17`.
+pub fn totals_text(totals: &TokenTotals) -> String {
     let tokens = format_count(totals.total);
     match totals.cost_usd {
         Some(cost) => format!("{tokens} tokens · ${cost:.2}"),

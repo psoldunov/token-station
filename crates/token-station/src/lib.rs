@@ -13,6 +13,7 @@ pub mod daemon;
 pub mod dbus;
 pub mod fixture;
 pub mod history;
+pub mod integration;
 pub mod notify;
 pub mod paths;
 pub mod pricing_refresh;
@@ -20,6 +21,7 @@ pub mod publish;
 pub mod settings;
 pub mod status;
 pub mod statusline;
+pub mod tray;
 
 /// Environment variable that selects the log filter (`tracing_subscriber` syntax).
 pub const LOG_ENV: &str = "TOKEN_STATION_LOG";
