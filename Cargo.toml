@@ -1,0 +1,56 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/ts-core",
+  "crates/ts-claude",
+  "crates/ts-codex",
+  "crates/token-station",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/psoldunov/token-station"
+rust-version = "1.85"
+publish = false
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+
+[workspace.dependencies]
+ts-core = { path = "crates/ts-core" }
+ts-claude = { path = "crates/ts-claude" }
+ts-codex = { path = "crates/ts-codex" }
+
+anyhow = "1"
+async-trait = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+clap = { version = "4", features = ["derive"] }
+ksni = "0.3"
+libc = "0.2"
+# rustls with the ring provider (no aws-lc, no OpenSSL) so the daemon links as a static musl binary.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots"] }
+notify-rust = { version = "4", default-features = false, features = ["z"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+schemars = "1"
+secrecy = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "fs", "sync", "signal", "io-util"] }
+toml = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+
+# dev
+insta = { version = "1", features = ["json"] }
+tempfile = "3"
+wiremock = "0.6"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+overflow-checks = true

@@ -1,0 +1,85 @@
+/* Token Station.
+ *
+ * Everything that can come from the Shell theme does: the level bars borrow
+ * the Shell's own `.slider` trough-and-fill, secondary text is the theme
+ * foreground at reduced actor opacity, and lengths are the Shell's
+ * $base_padding (6px) and $base_margin (4px).
+ *
+ * The only named colours are the warning and critical accents, copied from
+ * data/theme/gnome-shell-sass/_palette.scss: $yellow_5 (#e5a50a, the light
+ * variant of $warning_color) and $red_3 (#e01b24, the light variant of
+ * $destructive_color). St has no media queries, so one pair serves both
+ * variants; these are the brighter of the two and read on either background. */
+
+.token-station-panel-box {
+  spacing: 6px;
+}
+
+.token-station-meter {
+  -token-station-warning-color: #e5a50a;
+  -token-station-critical-color: #e01b24;
+}
+
+.token-station-panel-percent {
+  font-feature-settings: "tnum";
+  font-size: 0.9em;
+}
+
+.token-station-menu {
+  min-width: 22em;
+}
+
+/* Information rows: the Shell's popup-menu-item padding, tightened the way
+ * .world-clocks-grid tightens its own rows. */
+.token-station-window-item,
+.token-station-detail-item,
+.token-station-state-item,
+.token-station-chart-item,
+.token-station-model-item,
+.token-station-footer-item,
+.token-station-placeholder-item {
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+
+/* The vertical stack inside an information row. */
+.token-station-stack {
+  spacing: 4px;
+}
+
+/* Matches the Shell's %caption / %smaller. */
+.token-station-caption {
+  font-size: 0.9em;
+}
+
+.token-station-state-icon {
+  icon-size: 16px;
+  padding-right: 6px;
+}
+
+.token-station-state-item.token-station-warning .token-station-state-icon {
+  color: #e5a50a;
+}
+
+/* The level bars are stock BarLevel actors carrying the Shell's own `.slider`
+ * class, so the trough and the accent fill come from the theme. Only the
+ * warning and critical fills are ours. */
+.token-station-level.token-station-warning {
+  -barlevel-active-background-color: #e5a50a;
+}
+
+.token-station-level.token-station-critical {
+  -barlevel-active-background-color: #e01b24;
+}
+
+.token-station-sparkline {
+  height: 32px;
+}
+
+.token-station-sparkline.token-station-warning {
+  color: #e5a50a;
+}
+
+.token-station-sparkline.token-station-critical {
+  color: #e01b24;
+}

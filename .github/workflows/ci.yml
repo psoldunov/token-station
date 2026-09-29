@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  flake-check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # The GNOME VM check boots a NixOS guest and needs /dev/kvm.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            system-features = nixos-test benchmark big-parallel kvm
+
+      - name: nix flake check
+        run: nix flake check -L --keep-going
+
+  # The RustSec database is fetched at run time, which the `nix flake check`
+  # sandbox cannot do. A newly published advisory can fail this job without a
+  # code change; fix it by updating the crate or listing it in deny.toml.
+  advisories:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: cargo deny check advisories
+        run: nix shell --inputs-from . nixpkgs#cargo nixpkgs#cargo-deny -c cargo deny --locked check advisories
+
+  appimage:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: Build AppImage
+        run: nix build -L .#appimage
+      - name: Smoke-test AppImage on a non-Nix system
+        # bash with `-o pipefail`, so a failing command inside a pipe fails the step.
+        shell: bash
+        run: |
+          ./result/TokenStation-x86_64.AppImage --appimage-extract-and-run --help
+          ./result/TokenStation-x86_64.AppImage --appimage-extract-and-run status --json | head -c 400
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TokenStation-x86_64.AppImage
+          path: result/TokenStation-x86_64.AppImage

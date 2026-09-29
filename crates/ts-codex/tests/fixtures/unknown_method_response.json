@@ -1,0 +1,7 @@
+{
+  "id": 5,
+  "error": {
+    "code": -32600,
+    "message": "Invalid request: unknown variant `nonexistent/method`, expected one of `initialize`, ..."
+  }
+}

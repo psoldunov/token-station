@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=dev.soldunov.TokenStation
+Exec=@bindir@/token-station daemon
+SystemdService=token-station.service

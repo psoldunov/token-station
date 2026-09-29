@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Token Station
+GenericName=AI Usage Monitor
+Comment=Claude Code and Codex plan usage in your panel
+Icon=dev.soldunov.TokenStation
+Exec=token-station tray
+Terminal=false
+Categories=Utility;Monitor;
+Keywords=Claude;Codex;AI;usage;tokens;limits;
+NoDisplay=true
+X-GNOME-UsesNotifications=true
