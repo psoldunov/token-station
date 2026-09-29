@@ -46,7 +46,7 @@ KCM.SimpleKCM {
             claudeEnabled.checked = settings.claude ? settings.claude.enabled : true;
             codexEnabled.checked = settings.codex ? settings.codex.enabled : true;
             limitsInterval.value = Math.max(page.minimumLimitsInterval,
-                                            settings.general ? settings.general.limits_interval_secs : 300);
+                                            settings.general ? settings.general.limits_interval_secs : 600);
             page.settingsLoaded = true;
         });
     }

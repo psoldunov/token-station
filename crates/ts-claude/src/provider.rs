@@ -543,9 +543,8 @@ impl Provider for ClaudeProvider {
             }
             FetchOutcome::RateLimited { retry_after_secs } => {
                 self.apply_backoff(retry_after_secs, now);
-                let msg = "Rate limited by Claude's usage endpoint.".to_string();
-                self.set_last_outcome(LastOutcome::Failed(msg.clone()));
-                RefreshOutcome::Failed(msg)
+                self.set_last_outcome(LastOutcome::RateLimited);
+                RefreshOutcome::Failed(state::RATE_LIMITED_MESSAGE.to_string())
             }
             FetchOutcome::ServerError(code) => {
                 let msg = format!("Claude usage endpoint returned HTTP {code}.");
@@ -617,6 +616,9 @@ impl Provider for ClaudeProvider {
         .map(|w| w.observed_at)
         .max()
         .is_some_and(|t| now - t < STATUSLINE_FRESH_SECS);
+        let has_recent_endpoint_data = obs
+            .last_endpoint_success_at
+            .is_some_and(|t| now - t < state::RATE_LIMIT_GRACE_SECS);
 
         // No IO here: `io` is refreshed by `refresh_limits`/`refresh_tokens`.
         let credentials_expired_with_no_data =
@@ -629,6 +631,7 @@ impl Provider for ClaudeProvider {
             last_outcome: limits.last_outcome.clone(),
             has_window_data,
             has_fresh_statusline,
+            has_recent_endpoint_data,
             projects_dir_exists: io.projects_dir_exists,
         };
         let (provider_state, message) = state::provider_state(&inputs);

@@ -398,13 +398,14 @@ async fn the_scheduler_drives_both_refresh_loops() {
     // Let every loop reach its first sleep before moving the clock.
     settle(|| false).await;
 
-    // Past one tokens interval (60 s) but not the limits interval (300 s).
-    tokio::time::advance(Duration::from_secs(61)).await;
+    // Past one tokens interval but not the limits interval.
+    let general = Config::default().general;
+    tokio::time::advance(Duration::from_secs(general.tokens_interval_secs + 1)).await;
     let tokens = &h.claude.token_refreshes;
     assert!(settle(|| tokens.load(Ordering::SeqCst) >= 1).await);
     assert_eq!(h.claude.limits_refreshes.load(Ordering::SeqCst), 0);
 
-    tokio::time::advance(Duration::from_secs(300)).await;
+    tokio::time::advance(Duration::from_secs(general.limits_interval_secs)).await;
     let limits = &h.claude.limits_refreshes;
     assert!(settle(|| limits.load(Ordering::SeqCst) >= 1).await);
 

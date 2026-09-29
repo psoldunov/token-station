@@ -22,8 +22,13 @@ pub struct LimitsState {
 }
 
 const HARD_FLOOR_SECS: i64 = 30;
-const BACKOFF_BASE_SECS: u64 = 300;
+/// First wait after a 429; each consecutive one doubles it, up to the cap.
+const BACKOFF_BASE_SECS: u64 = 600;
 const BACKOFF_CAP_SECS: u64 = 3600;
+/// How long a reading stays good enough that a 429 is not worth a warning: the
+/// daemon retries on its own, and the numbers on screen are still current.
+pub const RATE_LIMIT_GRACE_SECS: i64 = 1800;
+pub const RATE_LIMITED_MESSAGE: &str = "Rate limited by Claude's usage endpoint.";
 /// Upper bound on a Claude-supplied `Retry-After` in seconds, so a corrupt or
 /// hostile response cannot push `backoff_until` far enough to overflow `i64`
 /// arithmetic (or just wedge the provider for an absurd length of time).
@@ -32,11 +37,12 @@ const MAX_RETRY_AFTER_SECS: i64 = 24 * 3600;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
     Proceed,
-    /// A real, persistent reason not to refresh (backoff, disabled, ...):
-    /// worth recording as the provider's last outcome.
+    /// A real, persistent reason not to refresh (disabled, ...): worth
+    /// recording as the provider's last outcome.
     Skip(String),
-    /// The scheduler ticked inside the soft interval floor. Not recorded as
-    /// the last outcome: it says nothing about data health and would flip a
+    /// The scheduler ticked inside the soft interval floor, or inside a 429
+    /// backoff. Not recorded as the last outcome: it says nothing new about
+    /// data health (the 429 itself was already recorded) and would flip a
     /// previously-`Ok` state to `Stale` on every fast tick.
     SoftSkip(String),
 }
@@ -59,7 +65,7 @@ pub fn decide(state: &mut LimitsState, config: &ClaudeConfig, now: i64, force: b
     }
     if let Some(until) = state.backoff_until {
         if now < until {
-            return Decision::Skip(format!(
+            return Decision::SoftSkip(format!(
                 "Rate limited by Claude; retrying in {}s.",
                 until - now
             ));
@@ -81,31 +87,35 @@ pub fn decide(state: &mut LimitsState, config: &ClaudeConfig, now: i64, force: b
     Decision::Proceed
 }
 
-/// Backoff after a 429. `retry_after_secs` comes from the response header when
-/// present.
+/// Backoff after a 429: returns when to try again and the step to remember.
+///
+/// Every consecutive 429 doubles the step, whether or not the response carried
+/// a `Retry-After`. The header is a lower bound, not a replacement: a short
+/// one repeated on every 429 would otherwise pin retries to the base cadence
+/// for as long as the endpoint keeps refusing.
 pub fn backoff_after_rate_limit(
-    prior_current_secs: u64,
+    prior_step_secs: u64,
     retry_after_secs: Option<u64>,
     min_endpoint_interval_secs: u64,
     now: i64,
 ) -> (i64, u64) {
-    if let Some(secs) = retry_after_secs {
-        let clamped = i64::try_from(secs)
-            .unwrap_or(i64::MAX)
-            .min(MAX_RETRY_AFTER_SECS);
-        (now.saturating_add(clamped), prior_current_secs)
+    let base = min_endpoint_interval_secs.max(BACKOFF_BASE_SECS);
+    let step = if prior_step_secs == 0 {
+        base
     } else {
-        let base = min_endpoint_interval_secs.max(BACKOFF_BASE_SECS);
-        let secs = if prior_current_secs == 0 {
-            base
-        } else {
-            (prior_current_secs * 2).min(BACKOFF_CAP_SECS)
-        };
-        (
-            now.saturating_add(i64::try_from(secs).unwrap_or(i64::MAX)),
-            secs,
-        )
-    }
+        // A configured floor above the cap must not make the backoff shrink.
+        prior_step_secs
+            .saturating_mul(2)
+            .min(BACKOFF_CAP_SECS.max(base))
+    };
+    let step_wait = i64::try_from(step).unwrap_or(i64::MAX);
+    let wait = retry_after_secs.map_or(step_wait, |secs| {
+        i64::try_from(secs)
+            .unwrap_or(i64::MAX)
+            .min(MAX_RETRY_AFTER_SECS)
+            .max(step_wait)
+    });
+    (now.saturating_add(wait), step)
 }
 
 /// Delay before the next `refresh_limits` attempt.
@@ -195,6 +205,10 @@ pub enum LastOutcome {
     Ok,
     Skipped(String),
     Failed(String),
+    /// The endpoint answered 429. Kept apart from [`LastOutcome::Failed`]
+    /// because the daemon's own backoff deals with it: it only warrants a
+    /// warning once the reading on screen is no longer recent.
+    RateLimited,
 }
 
 /// Everything [`provider_state`] needs, gathered from IO by the caller.
@@ -210,6 +224,8 @@ pub struct StateInputs {
     pub last_outcome: LastOutcome,
     pub has_window_data: bool,
     pub has_fresh_statusline: bool,
+    /// The endpoint's last good reading is younger than [`RATE_LIMIT_GRACE_SECS`].
+    pub has_recent_endpoint_data: bool,
     pub projects_dir_exists: bool,
 }
 
@@ -250,14 +266,20 @@ pub fn provider_state(inputs: &StateInputs) -> (ProviderState, Option<String>) {
                 (ProviderState::Loading, Some(msg.clone()))
             }
         }
-        LastOutcome::Failed(msg) => {
-            if inputs.has_window_data {
-                (ProviderState::Stale, Some(msg.clone()))
-            } else {
-                (ProviderState::Error, Some(msg.clone()))
-            }
-        }
+        LastOutcome::Failed(msg) => failed(inputs, msg),
+        LastOutcome::RateLimited if inputs.has_recent_endpoint_data => (ProviderState::Ok, None),
+        LastOutcome::RateLimited => failed(inputs, RATE_LIMITED_MESSAGE),
     }
+}
+
+/// A failure shown over whatever data there is: stale data, or an error with none.
+fn failed(inputs: &StateInputs, msg: &str) -> (ProviderState, Option<String>) {
+    let state = if inputs.has_window_data {
+        ProviderState::Stale
+    } else {
+        ProviderState::Error
+    };
+    (state, Some(msg.to_string()))
 }
 
 #[cfg(test)]
@@ -314,15 +336,17 @@ mod tests {
     }
 
     #[test]
-    fn decide_skips_during_429_backoff_even_when_forced() {
+    fn decide_soft_skips_during_429_backoff_even_when_forced() {
+        // Soft, so the 429 already recorded stays the last outcome.
         let mut st = LimitsState {
             backoff_until: Some(1000),
             ..Default::default()
         };
         assert!(matches!(
             decide(&mut st, &config(), 500, true),
-            Decision::Skip(_)
+            Decision::SoftSkip(_)
         ));
+        assert_eq!(decide(&mut st, &config(), 1000, true), Decision::Proceed);
     }
 
     /// `decide` soft-skips at `skip_now`, then proceeds at `proceed_now`.
@@ -342,17 +366,17 @@ mod tests {
 
     #[test]
     fn decide_soft_skips_within_interval_but_proceeds_after() {
-        // min_endpoint_interval_secs = 180
+        // min_endpoint_interval_secs = 300
         let st = LimitsState {
             last_attempt_at: Some(1000),
             ..Default::default()
         };
-        assert_soft_skip_then_proceed(st, &config(), 1010, 1200, false);
+        assert_soft_skip_then_proceed(st, &config(), 1299, 1300, false);
     }
 
     #[test]
     fn decide_force_bypasses_soft_floor_but_not_hard_floor() {
-        // force bypasses the 180s soft floor but not the 30s hard floor.
+        // force bypasses the 300s soft floor but not the 30s hard floor.
         let st = LimitsState {
             last_attempt_at: Some(1000),
             ..Default::default()
@@ -380,28 +404,54 @@ mod tests {
     }
 
     #[test]
-    fn backoff_uses_retry_after_when_present() {
-        let (until, current) = backoff_after_rate_limit(0, Some(45), 180, 1000);
-        assert_eq!(until, 1045);
-        assert_eq!(current, 0);
+    fn backoff_waits_for_the_longer_of_retry_after_and_the_step() {
+        // (Retry-After, expected wait): the 600 s first step is the floor.
+        for (retry_after, wait) in [(900, 900), (45, 600)] {
+            let (until, step) = backoff_after_rate_limit(0, Some(retry_after), 300, 1000);
+            assert_eq!(
+                (until, step),
+                (1000 + wait, 600),
+                "Retry-After {retry_after}"
+            );
+        }
+    }
+
+    #[test]
+    fn backoff_escalates_on_repeated_429s_with_retry_after() {
+        let (_, step1) = backoff_after_rate_limit(0, Some(60), 300, 0);
+        let (until2, step2) = backoff_after_rate_limit(step1, Some(60), 300, 600);
+        assert_eq!(step2, 1200);
+        assert_eq!(until2, 1800);
     }
 
     #[test]
     fn backoff_exponential_without_retry_after() {
-        let (until1, cur1) = backoff_after_rate_limit(0, None, 180, 0);
-        assert_eq!(cur1, 300); // max(180, 300)
-        assert_eq!(until1, 300);
-        let (until2, cur2) = backoff_after_rate_limit(cur1, None, 180, 300);
-        assert_eq!(cur2, 600);
-        assert_eq!(until2, 900);
+        let (until1, cur1) = backoff_after_rate_limit(0, None, 300, 0);
+        assert_eq!(cur1, 600); // max(300, 600)
+        assert_eq!(until1, 600);
+        let (until2, cur2) = backoff_after_rate_limit(cur1, None, 300, 600);
+        assert_eq!(cur2, 1200);
+        assert_eq!(until2, 1800);
+    }
+
+    #[test]
+    fn backoff_starts_at_a_configured_floor_above_the_base() {
+        let (until, step) = backoff_after_rate_limit(0, None, 900, 0);
+        assert_eq!((until, step), (900, 900));
     }
 
     #[test]
     fn backoff_caps_at_one_hour() {
-        let (_, cur) = backoff_after_rate_limit(3000, None, 180, 0);
+        let (_, cur) = backoff_after_rate_limit(3000, None, 300, 0);
         assert_eq!(cur, 3600);
-        let (_, cur2) = backoff_after_rate_limit(3600, None, 180, 0);
+        let (_, cur2) = backoff_after_rate_limit(3600, None, 300, 0);
         assert_eq!(cur2, 3600);
+    }
+
+    #[test]
+    fn backoff_never_shrinks_below_a_configured_floor_above_the_cap() {
+        let (_, step) = backoff_after_rate_limit(7200, None, 7200, 0);
+        assert_eq!(step, 7200);
     }
 
     #[test]
@@ -479,6 +529,7 @@ mod tests {
             last_outcome: LastOutcome::None,
             has_window_data: false,
             has_fresh_statusline: false,
+            has_recent_endpoint_data: false,
             projects_dir_exists: false,
         };
         assert_eq!(provider_state(&inputs).0, ProviderState::NotInstalled);
@@ -493,6 +544,7 @@ mod tests {
             last_outcome: LastOutcome::None,
             has_window_data: false,
             has_fresh_statusline: false,
+            has_recent_endpoint_data: false,
             projects_dir_exists: false,
         };
         let (state, msg) = provider_state(&inputs);
@@ -509,6 +561,7 @@ mod tests {
             last_outcome: LastOutcome::Failed("boom".into()),
             has_window_data: true,
             has_fresh_statusline: true,
+            has_recent_endpoint_data: false,
             projects_dir_exists: true,
         };
         assert_eq!(provider_state(&inputs).0, ProviderState::Ok);
@@ -523,6 +576,7 @@ mod tests {
             last_outcome: LastOutcome::Failed("boom".into()),
             has_window_data: true,
             has_fresh_statusline: false,
+            has_recent_endpoint_data: false,
             projects_dir_exists: true,
         };
         let (state, msg) = provider_state(&inputs);
@@ -539,6 +593,7 @@ mod tests {
             last_outcome: LastOutcome::Failed("boom".into()),
             has_window_data: false,
             has_fresh_statusline: false,
+            has_recent_endpoint_data: false,
             projects_dir_exists: true,
         };
         assert_eq!(provider_state(&inputs).0, ProviderState::Error);
@@ -553,8 +608,47 @@ mod tests {
             last_outcome: LastOutcome::None,
             has_window_data: false,
             has_fresh_statusline: false,
+            has_recent_endpoint_data: false,
             projects_dir_exists: true,
         };
         assert_eq!(provider_state(&inputs).0, ProviderState::Loading);
+    }
+
+    /// Signed in, with a 429 as the last outcome.
+    fn rate_limited(has_window_data: bool, has_recent_endpoint_data: bool) -> StateInputs {
+        StateInputs {
+            claude_binary_found: true,
+            credentials_file_exists: true,
+            credentials_expired_with_no_data: false,
+            last_outcome: LastOutcome::RateLimited,
+            has_window_data,
+            has_fresh_statusline: false,
+            has_recent_endpoint_data,
+            projects_dir_exists: true,
+        }
+    }
+
+    #[test]
+    fn state_ok_without_a_warning_when_rate_limited_over_a_recent_reading() {
+        assert_eq!(
+            provider_state(&rate_limited(true, true)),
+            (ProviderState::Ok, None)
+        );
+    }
+
+    #[test]
+    fn state_stale_with_a_warning_when_rate_limited_over_an_old_reading() {
+        assert_eq!(
+            provider_state(&rate_limited(true, false)),
+            (ProviderState::Stale, Some(RATE_LIMITED_MESSAGE.to_string()))
+        );
+    }
+
+    #[test]
+    fn state_error_when_rate_limited_with_no_data() {
+        assert_eq!(
+            provider_state(&rate_limited(false, false)),
+            (ProviderState::Error, Some(RATE_LIMITED_MESSAGE.to_string()))
+        );
     }
 }

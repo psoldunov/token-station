@@ -43,7 +43,9 @@ pub struct GeneralConfig {
 impl Default for GeneralConfig {
     fn default() -> Self {
         GeneralConfig {
-            limits_interval_secs: 300,
+            // Ten minutes: at five, Claude's usage endpoint answered 429 often
+            // enough that the warning became a regular sight.
+            limits_interval_secs: 600,
             tokens_interval_secs: 60,
             history_retention_days: 35,
         }
@@ -129,7 +131,7 @@ impl Default for ClaudeConfig {
             binary: String::new(),
             use_oauth_endpoint: true,
             user_agent: String::new(),
-            min_endpoint_interval_secs: 180,
+            min_endpoint_interval_secs: 300,
         }
     }
 }
@@ -345,7 +347,7 @@ mod tests {
     #[test]
     fn json_round_trip_uses_snake_case() {
         let json = Config::default().to_json();
-        assert!(json.contains("\"limits_interval_secs\":300"));
+        assert!(json.contains("\"limits_interval_secs\":600"));
         assert!(json.contains("\"process_mode\":\"on_demand\""));
         assert_eq!(Config::from_json(&json).unwrap(), Config::default());
     }

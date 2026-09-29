@@ -87,7 +87,7 @@ public struct SettingsDocument: Hashable, Sendable {
     }
 
     public var limitsIntervalSeconds: Int {
-        int("general.limits_interval_secs", default: 300)
+        int("general.limits_interval_secs", default: 600)
     }
 
     public var meterWindow: MeterWindowSetting {
