@@ -41,6 +41,45 @@ jobs:
       - name: cargo deny check advisories
         run: nix shell --inputs-from . nixpkgs#cargo nixpkgs#cargo-deny -c cargo deny --locked check advisories
 
+  # The macOS half: the daemon's macOS-only code (socket transport, Keychain) only
+  # compiles here, and the menu bar app needs the macOS SDK.
+  macos:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- --deny warnings
+      - name: cargo test
+        run: cargo test --workspace --locked
+      - name: swift test
+        working-directory: frontends/macos
+        run: swift test
+      - name: Install SwiftLint and Periphery
+        run: brew install swiftlint periphery
+      - name: swiftlint
+        working-directory: frontends/macos
+        run: swiftlint lint --strict
+      # The analyzer rules read a compiler log, which only lists what that build
+      # compiled: a clean scratch path and --build-tests make it the whole package.
+      - name: swiftlint analyze
+        working-directory: frontends/macos
+        run: |
+          swift build --build-tests --build-system native --scratch-path "$RUNNER_TEMP/analyze" -v > "$RUNNER_TEMP/swiftbuild.log"
+          swiftlint analyze --strict --compiler-log-path "$RUNNER_TEMP/swiftbuild.log"
+      - name: periphery
+        working-directory: frontends/macos
+        run: periphery scan --strict
+      - name: Build Token Station.app
+        run: frontends/macos/scripts/build-app.sh --zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TokenStation-macOS
+          path: frontends/macos/build/TokenStation-macOS.zip
+          if-no-files-found: error
+
   appimage:
     runs-on: ubuntu-24.04
     steps:
