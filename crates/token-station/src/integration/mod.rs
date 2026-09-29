@@ -187,7 +187,11 @@ pub fn plan(options: &SetupOptions, env: &Env, session: &Session) -> anyhow::Res
     let systemctl = on_path(systemd::SYSTEMCTL, session.path.as_deref());
 
     let mut steps = match target {
-        Desktop::Kde => plasma::steps(&payload_dir(options, session)?, &dirs)?,
+        Desktop::Kde => plasma::steps(
+            &payload_dir(options, session)?,
+            &dirs,
+            session.bus_address.as_deref(),
+        )?,
         Desktop::Gnome => gnome::steps(
             &payload_dir(options, session)?,
             &dirs,
@@ -448,6 +452,10 @@ pub fn uninstall(env: &Env, session: &Session) -> anyhow::Result<String> {
         keep_backup,
         &mut outcome,
     );
+    outcome.warnings.extend(plasma::announce_removal(
+        &manifest.dirs,
+        session.bus_address.as_deref(),
+    ));
     if let Err(error) = std::fs::remove_file(&manifest_path) {
         outcome
             .warnings

@@ -4,6 +4,9 @@
 #
 #   nix develop -c frontends/plasma/tests/render.sh
 #
+# TS_SHOT_SCALE (default 1) renders at that device pixel ratio, e.g. 4 for the
+# README's tray meter picture.
+#
 # Nothing here touches the running Plasma session: the QML runtime gets a
 # throw-away XDG_CONFIG_HOME holding only a colour scheme and a plasmarc.
 set -euo pipefail
@@ -45,7 +48,7 @@ render_one() {
     QT_QPA_PLATFORM=offscreen \
     QT_QUICK_BACKEND=software \
     QT_ASSUME_STDERR_HAS_CONSOLE=1 \
-    QT_SCALE_FACTOR=1 \
+    QT_SCALE_FACTOR="${TS_SHOT_SCALE:-1}" \
     QML_XHR_ALLOW_FILE_READ=1 \
         qml "${here}/render.qml" -- "${ui}" "${out}" "${variant}" "${fixtures[@]}"
 }

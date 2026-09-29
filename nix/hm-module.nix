@@ -12,6 +12,7 @@ let
   tomlFormat = pkgs.formats.toml { };
   busName = "dev.soldunov.TokenStation";
   gnomeUuid = "token-station@soldunov.dev";
+  plasmoidId = "dev.soldunov.tokenstation";
   # systemd user services start with a minimal PATH; the daemon also probes these,
   # but listing them keeps `claude`/`codex` discovery explicit.
   searchPath = lib.concatStringsSep ":" [
@@ -122,6 +123,42 @@ in
           };
           Install.WantedBy = [ "graphical-session.target" ];
         };
+
+        # Plasma's system tray looks for applets when plasmashell starts, and
+        # after that only when KPackage announces an install over D-Bus. A
+        # switch installs the applet without that announcement, so a running
+        # session would not show it until the next login. Announce it whenever
+        # this generation adds or changes it; the tray then adds the applet, or
+        # restarts it if it is already there. Nothing listens outside Plasma.
+        home.activation.tokenStationPlasmoid =
+          lib.hm.dag.entryAfter [ "installPackages" "linkGeneration" ]
+            ''
+              tokenStationAnnouncePlasmoid() {
+                local rel=home-path/share/plasma/plasmoids/${plasmoidId}
+                local new old="" bus socket
+                new=$(readlink -e "$newGenPath/$rel") || return 0
+                if [[ -v oldGenPath && -e "$oldGenPath/$rel" ]]; then
+                  old=$(readlink -e "$oldGenPath/$rel")
+                fi
+                [[ $new != "$old" ]] || return 0
+
+                # Under the NixOS module the switch runs from a system service
+                # with no session bus in its environment.
+                bus=''${DBUS_SESSION_BUS_ADDRESS:-}
+                if [[ -z $bus ]]; then
+                  socket=''${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/bus
+                  [[ -S $socket ]] || return 0
+                  bus=unix:path=$socket
+                fi
+
+                if ! run ${lib.getExe' pkgs.dbus "dbus-send"} --bus="$bus" --type=signal \
+                  /KPackage/Plasma/Applet org.kde.plasma.kpackage.packageInstalled \
+                  string:${plasmoidId}; then
+                  warnEcho "Could not announce the Token Station applet to Plasma; it appears after the next login."
+                fi
+              }
+              tokenStationAnnouncePlasmoid
+            '';
 
         # A plain definition: home-manager's GVariant arrays concatenate, so a
         # user-defined enabled-extensions list keeps its entries and gains this one.

@@ -17,7 +17,7 @@ import org.kde.kirigami as Kirigami
 KCM.SimpleKCM {
     id: page
 
-    /*! Applet-local: draw the percentage next to the meter. */
+    /*! Applet-local: badge the percentage on the meter. */
     property alias cfg_showPercentText: showPercentText.checked
 
     /*! Whole daemon config as last read, so unknown keys survive a write. */
@@ -140,7 +140,7 @@ KCM.SimpleKCM {
             id: showPercentText
 
             Kirigami.FormData.label: i18nc("@label", "Tray meter:")
-            text: i18nc("@option:check", "Show percentage next to the meter")
+            text: i18nc("@option:check", "Show percentage on the meter")
         }
 
         Item {

@@ -85,6 +85,19 @@ PlasmoidItem {
         return PlasmaCore.Types.ActiveStatus;
     }
 
+    // A high-priority action is what the system tray puts in its own header,
+    // beside configure and pin (applets/systemtray/qml/ExpandedRepresentation.qml);
+    // elsewhere it sits in the applet's context menu.
+    Plasmoid.contextualActions: [
+        PlasmaCore.Action {
+            text: i18nc("@action:button", "Refresh Now")
+            icon.name: "view-refresh"
+            priority: PlasmaCore.Action.HighPriority
+            enabled: !daemon.refreshing
+            onTriggered: daemon.refresh()
+        }
+    ]
+
     toolTipMainText: i18nc("@title Applet name", "Token Station")
     toolTipSubText: {
         if (!daemon.daemonRunning) {
@@ -115,7 +128,8 @@ PlasmoidItem {
         errorMessage: daemon.lastError
         appletTitle: root.toolTipMainText
         configureAction: Plasmoid.internalAction("configure")
-        // The system tray draws the applet title and configure button itself.
+        // The system tray draws the applet title, the refresh action and the
+        // configure button itself.
         containmentDrawsHeading: (Plasmoid.containmentDisplayHints & PlasmaCore.Types.ContainmentDrawsPlasmoidHeading) !== 0
         onRefreshRequested: daemon.refresh()
         onHistoryRequested: (provider, windowId, since, callback) => daemon.history(provider, windowId, since, callback)

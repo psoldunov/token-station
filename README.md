@@ -70,11 +70,15 @@ programs.token-station = {
 
 This installs the daemon as a supervised `systemd --user` service (also D-Bus
 activatable), plus the Plasma applet and the GNOME extension. On Plasma the applet shows
-up in the system tray by itself. On GNOME, enable the extension (or set
-`gnome.enable = true`) and log in again.
+up in the system tray by itself, in the running session too: the switch tells
+plasmashell about it. On GNOME, enable the extension (or set `gnome.enable = true`)
+and log in again.
 
 The flake also has a NixOS module (`nixosModules.default`) and an overlay
-(`overlays.default`). To try it without installing anything, run
+(`overlays.default`). Neither tells a running plasmashell about the applet, so after
+installing through them, log out and back in (or run
+`systemctl --user restart plasma-plasmashell`) before looking for it in the tray. To
+try it without installing anything, run
 `nix run github:psoldunov/token-station -- status`.
 
 If you install the package on its own, say with `nix profile install` or through the
@@ -105,7 +109,9 @@ tray icon.
 
 Everything `setup` creates goes into a manifest, and
 `./TokenStation-x86_64.AppImage uninstall` removes exactly that. If you move the
-AppImage, run `setup` again. On Plasma the applet appears in the system tray by itself.
+AppImage, run `setup` again. On Plasma the applet appears in the system tray by itself,
+without a new login: `setup` tells the running plasmashell about it, and `uninstall`
+tells it the applet is gone.
 GNOME on Wayland needs a fresh login before the extension shows up.
 
 The flags you are most likely to want are `--dry-run`, `--desktop kde|gnome|other`,

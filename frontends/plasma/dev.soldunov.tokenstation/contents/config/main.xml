@@ -7,7 +7,7 @@
 
   <group name="General">
     <entry name="showPercentText" type="bool">
-      <label>Draw the highest usage percentage next to the tray meter.</label>
+      <label>Badge the highest usage percentage on the tray meter.</label>
       <default>false</default>
     </entry>
   </group>

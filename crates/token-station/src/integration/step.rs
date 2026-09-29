@@ -13,6 +13,7 @@ use crate::atomic::write_atomic;
 use crate::integration::claude_settings::{self, Plan as StatuslinePlan};
 use crate::integration::existing::{self, Previous, Verdict};
 use crate::integration::manifest::Manifest;
+use crate::integration::plasma;
 use crate::tray;
 
 /// A single thing `setup` does.
@@ -45,6 +46,8 @@ pub enum Step {
         /// Which bus to look on; `None` means `$DBUS_SESSION_BUS_ADDRESS`.
         bus_address: Option<String>,
     },
+    /// Tell a running plasmashell about the applet, if this run installed it.
+    AnnouncePlasmoid(plasma::Announcement),
     /// Patch Claude Code's `settings.json`.
     Statusline(StatuslinePlan),
     /// A line for the summary; changes nothing.
@@ -68,6 +71,7 @@ impl Step {
             Step::Run { program, args } => format!("run {}", command_line(program, args)),
             Step::Spawn { program, args } => format!("start {}", command_line(program, args)),
             Step::StopTray { .. } => format!("stop the tray on {}", tray::TRAY_BUS_NAME),
+            Step::AnnouncePlasmoid(_) => format!("tell Plasma about {}", plasma::APPLET_ID),
             Step::Statusline(plan) => format!(
                 "patch {} · statusLine = {}",
                 plan.settings.display(),
@@ -220,6 +224,9 @@ fn run_other_step(
         Step::Run { program, args } => run(program, args, outcome),
         Step::Spawn { program, args } => spawn(program, args, outcome),
         Step::StopTray { bus_address } => stop_tray(bus_address.as_deref(), outcome),
+        Step::AnnouncePlasmoid(announcement) => {
+            outcome.warnings.extend(announcement.send(&manifest.dirs));
+        }
         Step::Statusline(plan) => {
             let record = claude_settings::apply(plan, previous.claude)?;
             manifest.add_file(&record.backup);

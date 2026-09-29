@@ -8,9 +8,10 @@
     (applets/devicenotifier/qml/FullRepresentation.qml): a PlasmoidHeading that
     only carries the applet's own actions, a ScrollView body with largeSpacing
     margins, and a PlaceholderMessage centred over it for the empty states. The
-    system tray draws the title and the configure button itself
-    (applets/systemtray/qml/ExpandedRepresentation.qml), so this header hides both
-    when the containment says it draws the heading.
+    system tray draws the title, the configure button and the applet's
+    high-priority actions (Refresh Now, from main.qml) in its own header
+    (applets/systemtray/qml/ExpandedRepresentation.qml), so this header is hidden
+    whenever the containment says it draws the heading.
 */
 pragma ComponentBehavior: Bound
 
@@ -105,22 +106,20 @@ PlasmaExtras.Representation {
     Layout.preferredHeight: Kirigami.Units.gridUnit * 28
 
     header: PlasmaExtras.PlasmoidHeading {
+        // An empty row under the tray's own header would only take up space.
+        visible: !root.containmentDrawsHeading
+
         RowLayout {
             anchors.fill: parent
             spacing: Kirigami.Units.smallSpacing
 
             Kirigami.Heading {
                 Layout.fillWidth: true
-                visible: !root.containmentDrawsHeading
                 level: 1
                 text: root.appletTitle
                 textFormat: Text.PlainText
                 elide: Text.ElideRight
                 maximumLineCount: 1
-            }
-
-            Item {
-                Layout.fillWidth: root.containmentDrawsHeading
             }
 
             PlasmaComponents3.BusyIndicator {
@@ -147,7 +146,7 @@ PlasmaExtras.Representation {
             // `action` property will not accept; the system tray's own configure
             // button drives it the same way, by hand.
             PlasmaComponents3.ToolButton {
-                visible: !root.containmentDrawsHeading && !!root.configureAction
+                visible: !!root.configureAction
                 icon.name: "configure"
                 text: root.configureAction ? root.configureAction.text : ""
                 display: PlasmaComponents3.AbstractButton.IconOnly
