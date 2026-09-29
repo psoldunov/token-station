@@ -1,0 +1,42 @@
+# Periphery for the macOS front end.
+#
+# A bare `periphery scan` in this directory finds Package.swift, builds every
+# target — TokenStation, ts-render, both libraries and the tests — and reports
+# what nothing reaches. The retains below are the ones a SwiftUI menu bar app
+# genuinely needs, and they are Periphery's own options rather than blanket
+# `// periphery:ignore` comments:
+#
+#   retain_objc_accessible     `@objc` members are reached through the
+#                              Objective-C runtime: the app delegate's wake
+#                              handler is a `#selector` target and no Swift
+#                              call site names it.
+#   retain_codable_properties  Snapshot properties are written by the decoder
+#                              from the daemon's JSON. A field the panel does
+#                              not read yet is still part of the wire contract.
+#   retain_swift_ui_previews   A preview is a development surface, not dead
+#                              code.
+#
+# `retain_public` is off on purpose. Neither library is a package product, so
+# `public` here only means "another target in this package may use it" — and a
+# public declaration nothing uses is exactly the dead code this scan is for.
+# `retain_assign_only_properties` is off for the same reason: a property the app
+# only ever writes is one nothing shows.
+#
+# Tests are indexed too, so a test helper nothing calls is still reported.
+
+# SwiftPM on this toolchain defaults to the Xcode build system, which writes its
+# index somewhere Periphery does not look; the native build system puts it at
+# .build/debug/index/store, which is the path Periphery expects. SwiftPM has
+# started warning that `--build-system native` is deprecated, so this line comes
+# out the day Periphery learns to read the Xcode build system's index.
+build_arguments:
+  - --build-system
+  - native
+
+retain_objc_accessible: true
+retain_codable_properties: true
+retain_swift_ui_previews: true
+
+report_exclude:
+  - "**/.build/**"
+  - "**/build/**"
