@@ -1,4 +1,5 @@
 import CoreGraphics
+import Foundation
 
 /// The measurements the panel is built from.
 ///
@@ -27,6 +28,11 @@ enum PanelMetrics {
 
     static let barHeight: CGFloat = 6
     static let chartHeight: CGFloat = 34
+
+    /// How long the panel takes to grow or shrink, on an ease-out curve. The
+    /// disclosure's slide and the window's resize share it, so the bottom edge
+    /// of the window stays with the content above it.
+    static let resizeDuration: TimeInterval = 0.18
 
     static let menuRowCornerRadius: CGFloat = 5
     static let menuRowVerticalPadding: CGFloat = 4
