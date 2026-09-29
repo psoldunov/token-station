@@ -1,15 +1,16 @@
 # Token Station
 
-Claude Code and OpenAI Codex plan usage in your Linux panel — session and weekly
-limits, reset countdowns, token counts and API-equivalent cost — with a front end that
-looks like it shipped with your desktop.
+Token Station puts your Claude Code and OpenAI Codex plan usage in the Linux panel. You
+get session and weekly limits, reset countdowns, token counts and API-equivalent cost,
+in a front end that looks like it shipped with your desktop.
 
 | KDE Plasma 6 (system tray applet) | GNOME Shell (top-bar indicator) |
 |---|---|
 | ![Plasma popup](docs/screenshots/plasma-popup-light.png) | ![GNOME menu](docs/screenshots/gnome-menu.png) |
 
-The tray icon is a dual mini-meter: one bar for Claude Code, one for Codex, filled to
-the most constrained limit and tinted when it crosses your warning/critical thresholds.
+The tray icon is a small two-bar meter, one bar for Claude Code and one for Codex. Each
+bar fills to the most constrained limit and changes colour when it crosses your warning
+or critical threshold.
 
 ![Tray meter](docs/screenshots/plasma-tray-meter.png)
 
@@ -25,21 +26,26 @@ the most constrained limit and tinted when it crosses your warning/critical thre
 
 A small Rust daemon is the only process that touches credentials, the network or log
 files. It publishes one JSON snapshot on the session bus
-(`dev.soldunov.TokenStation`, see [docs/dbus-api.md](docs/dbus-api.md)); the desktop
-front ends only render it. Details: [docs/architecture.md](docs/architecture.md).
+(`dev.soldunov.TokenStation`, see [docs/dbus-api.md](docs/dbus-api.md)), and the desktop
+front ends only render it. [docs/architecture.md](docs/architecture.md) has the details.
 
-**Claude Code** — plan limits come from the same endpoint Claude Code's `/usage` uses,
-called with the CLI's own sign-in (read-only: the token is never refreshed, written or
-logged). While Claude Code runs, the optional statusline collector feeds the official
-`rate_limits` statusline data straight to the daemon. Token counts and cost come from
-the local transcripts in `~/.claude/projects`.
+### Claude Code
 
-**Codex** — the daemon starts `codex app-server` on demand (the logged-in CLI does all
-authentication), reads `account/rateLimits/read` and `account/usage/read`, and stops the
-child after a minute of idleness. Local rollout logs provide per-model token counts.
+Plan limits come from the endpoint behind Claude Code's own `/usage` command, called with
+the CLI's sign-in. Token Station only reads that token. It never refreshes, writes or
+logs it. If you turn on the optional statusline collector, Claude Code also sends its
+official `rate_limits` statusline data straight to the daemon while it runs. Token counts
+and cost come from the local transcripts in `~/.claude/projects`.
 
-See [docs/data-sources.md](docs/data-sources.md) for the exact calls, what is
-undocumented, and how failures degrade.
+### Codex
+
+The daemon starts `codex app-server` when it needs fresh numbers and lets the logged-in
+CLI handle authentication. It reads `account/rateLimits/read` and `account/usage/read`,
+then stops the child after a minute of idleness. Per-model token counts come from the
+local rollout logs.
+
+[docs/data-sources.md](docs/data-sources.md) lists the exact calls, says which ones are
+undocumented, and explains what happens when one fails.
 
 ## Install
 
@@ -63,25 +69,25 @@ programs.token-station = {
 ```
 
 This installs the daemon as a supervised `systemd --user` service (also D-Bus
-activatable), the Plasma applet and the GNOME extension. On Plasma the applet appears in
-the system tray automatically; on GNOME enable the extension (or set
+activatable), plus the Plasma applet and the GNOME extension. On Plasma the applet shows
+up in the system tray by itself. On GNOME, enable the extension (or set
 `gnome.enable = true`) and log in again.
 
-A NixOS module (`nixosModules.default`) and an overlay (`overlays.default`) are
-available too; `nix run github:psoldunov/token-station -- status` works without installing.
+The flake also has a NixOS module (`nixosModules.default`) and an overlay
+(`overlays.default`). To try it without installing anything, run
+`nix run github:psoldunov/token-station -- status`.
 
-Installing the package on its own — `nix profile install`, the overlay, or any
-packaging that just puts the files in a profile — gives you the systemd user unit
-(`share/systemd/user/token-station.service`) and the D-Bus activation file, but nothing
-enables the unit. Either let D-Bus activate it (the front ends do that on their own), or
-start it yourself once:
+If you install the package on its own, say with `nix profile install` or through the
+overlay, you get the systemd user unit (`share/systemd/user/token-station.service`) and
+the D-Bus activation file, but nothing enables the unit. You can leave that to D-Bus
+activation, which the front ends trigger on their own, or enable it once yourself:
 
 ```sh
 systemctl --user daemon-reload
 systemctl --user enable --now token-station
 ```
 
-The home-manager and NixOS modules, and the AppImage's `setup`, do this for you.
+The home-manager and NixOS modules, and the AppImage's `setup`, take care of this for you.
 
 ### AppImage
 
@@ -92,24 +98,29 @@ chmod +x TokenStation-x86_64.AppImage
 ./TokenStation-x86_64.AppImage              # same as `setup`
 ```
 
-`setup` detects your desktop and installs the matching front end into
-`~/.local/share`, registers the daemon (systemd user unit + D-Bus activation pointing at
-the AppImage) and, on desktops other than KDE/GNOME, autostarts the tray icon. Useful
-flags: `--dry-run`, `--desktop kde|gnome|other`, `--claude-statusline` (wraps your
-existing Claude Code statusline; refuses Nix-managed settings files) and `--force`
-(replace existing files that `setup` did not create; Nix-managed files are never
-replaced). Everything it creates is recorded, and
-`./TokenStation-x86_64.AppImage uninstall` removes exactly that. Re-run `setup` after
-moving the file. On Plasma the applet appears in the system tray on its own; GNOME on
-Wayland needs a re-login before the extension shows up.
+`setup` works out which desktop you are on and installs the matching front end into
+`~/.local/share`. It registers the daemon as a systemd user unit with D-Bus activation
+pointing at the AppImage. On desktops other than KDE and GNOME it also autostarts the
+tray icon.
+
+Everything `setup` creates goes into a manifest, and
+`./TokenStation-x86_64.AppImage uninstall` removes exactly that. If you move the
+AppImage, run `setup` again. On Plasma the applet appears in the system tray by itself.
+GNOME on Wayland needs a fresh login before the extension shows up.
+
+The flags you are most likely to want are `--dry-run`, `--desktop kde|gnome|other`,
+`--claude-statusline` and `--force`. `--claude-statusline` wraps your existing Claude
+Code statusline, and refuses if the settings file is managed by Nix. `--force` replaces
+existing files that `setup` did not create, but it still never touches Nix-managed ones.
 
 ## Requirements
 
-- KDE Plasma ≥ 6.4 or GNOME Shell 46–50 (other desktops: any StatusNotifierItem host; on
-  GNOME the tray fallback needs the AppIndicator extension, the native extension does not).
-- Claude Code signed in with a Pro/Max subscription for plan limits (API-key users still
-  get local token counts and cost).
-- Codex CLI signed in with ChatGPT for plan limits (`codex login`).
+- KDE Plasma 6.4 or newer, or GNOME Shell 46 to 50. Other desktops need a
+  StatusNotifierItem host. On GNOME, only the tray fallback needs the AppIndicator
+  extension; the native extension works without it.
+- For Claude Code plan limits, Claude Code signed in with a Pro or Max subscription.
+  API-key users still get local token counts and cost.
+- For Codex plan limits, the Codex CLI signed in with ChatGPT (`codex login`).
 
 ## CLI
 
@@ -124,8 +135,8 @@ token-station setup | uninstall   AppImage desktop integration
 
 ## Configuration
 
-`$XDG_CONFIG_HOME/token-station/config.toml` — every key is optional; the applet and
-extension settings pages edit the same file through the daemon.
+Settings live in `$XDG_CONFIG_HOME/token-station/config.toml`. Every key is optional. The
+applet and extension settings pages edit the same file through the daemon.
 
 ```toml
 [general]
@@ -163,7 +174,7 @@ linger_secs = 60              # idle seconds before the app-server child stops (
 http_fallback = true
 ```
 
-Unknown keys are rejected, so a typo fails loudly instead of being ignored.
+The daemon rejects unknown keys, so a typo fails loudly instead of being quietly ignored.
 
 ## Development
 
@@ -181,7 +192,7 @@ nix build .#appimage                          # static musl AppImage
 ```
 
 Fixture mode serves `data/fixtures/*.json` with live countdowns, synthetic history and
-in-memory settings, so front ends can be developed without real accounts.
+in-memory settings, so you can work on the front ends without real accounts.
 
 ## License
 

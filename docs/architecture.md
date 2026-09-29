@@ -14,35 +14,54 @@
 
 ## Design decisions
 
-- **One daemon, thin front ends.** Only the daemon reads credentials, calls the network
-  or parses logs. The Plasma applet and GNOME extension are renderers of one JSON
-  snapshot, so business logic exists once, the GNOME extension never blocks the
-  compositor, and the pure-QML applet has no compiled plugin tied to a Qt ABI (the same
-  package works from Nix and from the AppImage).
-- **Shell-native front ends instead of a windowed tray app.** Vanilla GNOME has no tray,
-  and on Wayland a regular window cannot be anchored next to a tray icon. A Plasma tray
-  applet and a Shell panel indicator get real anchored popups and inherit theme, accent
-  and dark mode automatically.
-- **Read-only credentials.** Both CLIs rotate refresh tokens; a third-party refresh would
-  race the CLI and can sign the user out. The Claude provider only reads the access token
-  and, when it has expired, asks `claude auth status` (the CLI refreshes itself). The
-  Codex provider lets `codex app-server` handle auth entirely.
-- **On-demand Codex child.** `codex app-server` holds ~150 MB; the first account request
-  after spawn takes ~6 s. The daemon spawns it per refresh and stops it after
-  `linger_secs` of idleness (`process_mode = "persistent"` keeps it).
-- **Local vs account tokens.** `tokens` in the snapshot come from this machine's logs
-  (with a per-bucket breakdown and cost); Codex `accountTokens` come from the backend and
-  cover all devices. They are shown separately because they mean different things.
-- **Alerts fire once per window per reset period**, persisted across restarts
-  (`ts_core::alerts`), with a tolerance for backends jittering `resets_at`.
-- **Static musl AppImage.** reqwest + rustls/ring, zbus (pure Rust), bundled SQLite: no
-  glibc, libdbus, OpenSSL or FUSE 2 dependency. The AppImage is a squashfs appended to
-  the pinned static type2 runtime, assembled inside the Nix sandbox.
+### One daemon, thin front ends
+
+Only the daemon reads credentials, calls the network or parses logs. The Plasma applet
+and the GNOME extension just render the JSON snapshot it publishes. Business logic lives
+in one place, and the GNOME extension never blocks the compositor. The applet is pure
+QML with no compiled plugin tied to a Qt ABI, so the same package works from Nix and
+from the AppImage.
+
+### Shell-native front ends instead of a windowed tray app
+
+Vanilla GNOME has no tray, and on Wayland a regular window can't be anchored next to a
+tray icon. A Plasma tray applet and a Shell panel indicator get properly anchored popups,
+and they follow the theme, accent colour and dark mode with no extra work.
+
+### Read-only credentials
+
+Both CLIs rotate their refresh tokens. If another program refreshed a token, it would
+race the CLI and could sign the user out. So the Claude provider only reads the access
+token. When that token has expired, it runs `claude auth status` and lets the CLI
+refresh itself. The Codex provider leaves auth entirely to `codex app-server`.
+
+### Codex child on demand
+
+`codex app-server` takes about 150 MB of memory, and the first account request after
+spawn takes about 6 s. The daemon spawns it for each refresh and stops it after
+`linger_secs` of idleness. Set `process_mode = "persistent"` to keep it running.
+
+### Local tokens and account tokens
+
+`tokens` in the snapshot come from this machine's logs, with a per-bucket breakdown and
+cost. Codex `accountTokens` come from the backend and cover every device. They measure
+different things, so the front ends show them separately.
+
+### Alerts fire once per window per reset period
+
+Which alerts have fired is saved across restarts (`ts_core::alerts`). Some backends
+jitter `resets_at` a little between responses, and the check tolerates that.
+
+### Static musl AppImage
+
+reqwest with rustls/ring, zbus (pure Rust) and a bundled SQLite mean the binary does not
+depend on glibc, libdbus, OpenSSL or FUSE 2. The AppImage is a squashfs appended to the
+pinned static type2 runtime, and it is assembled inside the Nix sandbox.
 
 ## Runtime files
 
 - Config: `$XDG_CONFIG_HOME/token-station/config.toml`
 - State: `$XDG_STATE_HOME/token-station/{history.sqlite,alerts.json,install-manifest.json}`
 - Cache: `$XDG_CACHE_HOME/token-station/pricing.json`
-- Runtime: `$XDG_RUNTIME_DIR/token-station/claude-statusline.json` (statusline drop box
-  used when the daemon is not reachable)
+- Runtime: `$XDG_RUNTIME_DIR/token-station/claude-statusline.json` (where the statusline
+  collector drops its data when the daemon is not reachable)

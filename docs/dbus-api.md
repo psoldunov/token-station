@@ -1,8 +1,8 @@
 # D-Bus API
 
 The daemon (`token-station daemon`) owns the session-bus name `dev.soldunov.TokenStation`
-and exports one object. Front ends (Plasma applet, GNOME extension, SNI tray, CLI) only
-talk to this interface.
+and exports one object. The front ends (Plasma applet, GNOME extension, SNI tray, CLI)
+talk to the daemon only through this interface.
 
 - Bus name: `dev.soldunov.TokenStation`
 - Object path: `/dev/soldunov/TokenStation`
@@ -22,17 +22,18 @@ so calling any method starts the daemon if it is not running.
 
 | Signature | Description |
 |-----------|-------------|
-| `Refresh() → ()` | Refresh every provider now. Coalesced: concurrent calls share one refresh. Providers still apply their hard rate-limit backoff (forced endpoint calls are at least 30 s apart). Returns once the refresh finished. |
+| `Refresh() → ()` | Refresh every provider now. Concurrent calls are coalesced into one refresh. Providers still apply their hard rate-limit backoff, so forced endpoint calls are at least 30 s apart. Returns once the refresh has finished. |
 | `GetHistory(s provider, s window_id, t since) → s` | JSON array `[[ts, percent], …]` of recorded samples for one window since `since` (Unix seconds), oldest first, down-sampled to at most 120 points. Unknown provider/window returns `[]`. |
 | `GetSettings() → s` | Current config as JSON (snake_case keys, same structure as `config.toml`, see `crates/ts-core/src/config.rs`). |
-| `SetSettings(s json) → ()` | Replace the config. Missing keys take defaults. Validated (bounds, unknown keys rejected) and written to `config.toml`. Fails with `org.freedesktop.DBus.Error.InvalidArgs` when the document is the problem: a message listing every bound violation (a JSON syntax error or an unknown key is reported on its own, before bounds are checked), a payload over 256 KiB, or a `config.toml` that is a symlink or read-only (e.g. managed by Nix/home-manager — the user has to change it there). Fails with `org.freedesktop.DBus.Error.Failed` when the settings were valid and the daemon could not carry them out — a failed write, say, on a full disk. Returns as soon as the new config is stored, the providers are rebuilt and a snapshot is published; reading the rebuilt providers and refreshing prices happen afterwards, so the reply does not wait on the network. |
+| `SetSettings(s json) → ()` | Replace the config. Missing keys take their defaults. The daemon checks bounds, rejects unknown keys and writes the result to `config.toml`. It fails with `org.freedesktop.DBus.Error.InvalidArgs` when the document is the problem. That covers bound violations (the message lists all of them), a JSON syntax error or unknown key (reported on its own, before any bounds check), a payload over 256 KiB, and a `config.toml` that is a symlink or read-only. The last case usually means Nix/home-manager manages the file, and the user has to change the setting there. It fails with `org.freedesktop.DBus.Error.Failed` when the settings were valid but the daemon could not apply them, for example because the write failed on a full disk. The reply comes back as soon as the new config is stored, the providers are rebuilt and a snapshot is published. Reading the rebuilt providers and refreshing prices happen afterwards, so the reply does not wait on the network. |
 | `IngestClaudeStatusline(s json) → ()` | Used by `token-station statusline`. Raw statusline JSON from Claude Code (max 64 KiB). Invalid input fails with `InvalidArgs`. |
 
 ## Snapshot JSON
 
-camelCase keys, Unix-second timestamps, `schemaVersion` = 1. The authoritative schema is
-`data/snapshot.schema.json` (generated from `crates/ts-core/src/snapshot.rs`; a test fails
-when it is stale). Example scenarios live in `data/fixtures/snapshot-*.json`.
+Keys are camelCase, timestamps are Unix seconds, and `schemaVersion` is 1. The
+authoritative schema is `data/snapshot.schema.json`. It is generated from
+`crates/ts-core/src/snapshot.rs`, and a test fails if it falls out of date. Example
+scenarios live in `data/fixtures/snapshot-*.json`.
 
 ```jsonc
 {
@@ -77,8 +78,8 @@ when it is stale). Example scenarios live in `data/fixtures/snapshot-*.json`.
 }
 ```
 
-Front ends compute "resets in …" themselves from `resetsAt` so countdowns stay live
-between snapshots. `level` values are already classified against the user's thresholds.
+Front ends work out "resets in …" from `resetsAt` themselves, so countdowns keep ticking
+between snapshots. `level` values already take the user's thresholds into account.
 
 ## Examples
 
@@ -94,4 +95,4 @@ busctl --user call dev.soldunov.TokenStation /dev/soldunov/TokenStation \
 
 `token-station tray` owns `dev.soldunov.TokenStation.Tray` (single instance) and exports
 `dev.soldunov.TokenStation.Tray1` with a `Quit()` method that `uninstall` uses to stop it.
-It is an implementation detail, not part of the public API above.
+This is an implementation detail and not part of the public API above.
