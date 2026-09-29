@@ -231,6 +231,7 @@ cargo clippy --workspace --all-targets        # clippy::pedantic via [workspace.
 cargo deny check && cargo machete             # licences, bans, sources, advisories; unused deps
 cargo run -p token-station -- daemon --fixture data/fixtures/snapshot-near-limit.json
 plasmoidviewer -a frontends/plasma/dev.soldunov.tokenstation
+frontends/plasma/tests/preview.sh             # both at once, on a private bus beside an installed daemon
 bash frontends/plasma/tests/render.sh         # offscreen renders of every fixture
 nix build -L .#checks.x86_64-linux.gnome-vm   # boots GNOME, loads the extension, screenshots
 nix flake check                               # clippy, tests, fmt, deny, machete, packages, VM test
