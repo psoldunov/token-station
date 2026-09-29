@@ -43,11 +43,28 @@ to the keyed windows, so new codenamed keys don't break it.
 - Polling: every 600 s by default. At 300 s the endpoint returned 429 often enough for
   users to notice. `claude.min_endpoint_interval_secs` sets the shortest gap between two
   endpoint calls (default 300 s, minimum 120 s). Forced refreshes use a 30 s minimum
-  instead. Each consecutive 429 doubles the backoff, from 600 s up to 1 h. A longer
-  `Retry-After` wins. No call is made during a backoff, forced or not.
+  instead. Each consecutive 429 doubles the backoff, from 600 s up to 1 h. With nothing
+  on screen yet, the first retry comes sooner, at `claude.min_endpoint_interval_secs`,
+  and doubles from there. A longer `Retry-After` wins. No call is made during a
+  backoff, forced or not. Every 429 is logged with its `Retry-After` and the wait
+  chosen, and so is the first good answer after one.
 - A 429 shows no warning while the last good reading is under 30 min old, because the
   numbers on screen are still current and the daemon retries on its own. After that the
-  provider shows as stale with "Rate limited by Claude's usage endpoint."
+  provider shows as stale with "Rate limited by Claude's usage endpoint." With no
+  reading at all it shows as loading with "Rate limited by Claude's usage endpoint;
+  retrying automatically."
+- Restarts: the last reading, the time of the last call and any backoff are written to
+  `claude-limits.json` in the state directory and read back when the daemon starts,
+  before any refresh, including the `Refresh()` call that started the daemon. A
+  restart therefore shows the last numbers straight away, keeps to the endpoint floor and
+  the backoff, and does not call the endpoint on every start. A reading or last call
+  older than a week is dropped, as is a backoff that has already ended. Timestamps later
+  than the current time are treated as the current time.
+- Sign-in changes: the file also records the sign-in's plan (`subscriptionType` and
+  `rateLimitTier`), because the sign-in names no account without PII. A saved state
+  from another plan is not restored. When a running daemon sees the sign-in move to
+  another plan, it drops the old reading and backoff. Switching between two accounts on
+  the same plan is not detected.
 - User-Agent: without the CLI's User-Agent the endpoint rate-limits hard, and other
   usage monitors that call it have hit the same problem. You can change the value with
   `claude.user_agent`. Keep in mind this endpoint is not a documented API and may change.

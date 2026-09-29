@@ -17,6 +17,7 @@ use crate::env::{self, ClaudeEnv};
 use crate::labels;
 use crate::logs::{self, LogScanState};
 use crate::oauth_usage::{self, FetchOutcome};
+use crate::saved::SavedLimits;
 use crate::state::{self, Decision, LastOutcome, LimitsState, StateInputs};
 use crate::statusline;
 use crate::store::CredentialStore;
@@ -28,14 +29,23 @@ const TOKEN_RETENTION_SECS: i64 = 8 * 86_400;
 const FALLBACK_USER_AGENT: &str = "claude-code/2.1.283";
 
 #[derive(Debug, Clone, Default)]
-struct Observations {
-    endpoint_windows: Vec<UsageWindow>,
-    statusline_session: Option<UsageWindow>,
-    statusline_weekly_all: Option<UsageWindow>,
-    credits: Option<Credits>,
-    breakdown: Vec<BreakdownRow>,
-    plan: Option<String>,
-    last_endpoint_success_at: Option<i64>,
+pub(crate) struct Observations {
+    pub(crate) endpoint_windows: Vec<UsageWindow>,
+    pub(crate) statusline_session: Option<UsageWindow>,
+    pub(crate) statusline_weekly_all: Option<UsageWindow>,
+    pub(crate) credits: Option<Credits>,
+    pub(crate) breakdown: Vec<BreakdownRow>,
+    pub(crate) plan: Option<String>,
+    pub(crate) last_endpoint_success_at: Option<i64>,
+}
+
+impl Observations {
+    /// Whether any window, from either source, is there to show.
+    fn has_window_data(&self) -> bool {
+        !self.endpoint_windows.is_empty()
+            || self.statusline_session.is_some()
+            || self.statusline_weekly_all.is_some()
+    }
 }
 
 /// Where [`probe_io`] should look. Gathering it touches no disk, so it can be
@@ -54,7 +64,8 @@ fn probe_io(probe: &IoProbe, now: i64) -> IoCache {
     IoCache {
         claude_binary_found: probe.binary_found,
         credentials_file_exists: !matches!(loaded, Err(CredentialsError::NotFound)),
-        credentials_expired: loaded.is_ok_and(|c| c.expired(now)),
+        credentials_expired: loaded.as_ref().is_ok_and(|c| c.expired(now)),
+        plan_fingerprint: loaded.ok().map(|c| c.plan_fingerprint()),
         projects_dir_exists: probe.projects.iter().any(|p| p.exists()),
     }
 }
@@ -72,6 +83,8 @@ struct IoCache {
     /// Whether the credentials on disk are expired, independent of whether
     /// we still have window data from another source.
     credentials_expired: bool,
+    /// The plan of the sign-in, when it could be read.
+    plan_fingerprint: Option<String>,
     projects_dir_exists: bool,
 }
 
@@ -363,10 +376,37 @@ impl ClaudeProvider {
     }
 
     fn store_io_cache(&self, cache: IoCache) {
+        self.follow_sign_in(cache.plan_fingerprint.clone());
         *self
             .io_cache
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = cache;
+    }
+
+    /// Drop everything held for a sign-in on another plan than `plan_fingerprint`.
+    ///
+    /// Its reading describes someone else's limits, and its backoff would hold
+    /// off the new sign-in's first request for as long as it had left.
+    fn follow_sign_in(&self, plan_fingerprint: Option<String>) {
+        let Some(plan_fingerprint) = plan_fingerprint else {
+            return;
+        };
+        // Lock order: `limits`, then `observations`.
+        let mut limits = self
+            .limits
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let held = limits.plan_fingerprint.as_deref();
+        if state::plan_changed(held, Some(&plan_fingerprint)) {
+            tracing::info!("the Claude sign-in is on another plan now; dropping the old reading");
+            *self
+                .observations
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Observations::default();
+            *limits = limits.for_plan(plan_fingerprint);
+        } else if held.is_none() {
+            limits.plan_fingerprint = Some(plan_fingerprint);
+        }
     }
 
     fn set_last_outcome(&self, outcome: LastOutcome) {
@@ -381,6 +421,9 @@ impl ClaudeProvider {
             .limits
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if st.backoff_current_secs > 0 {
+            tracing::info!("claude oauth usage answered again after a rate limit");
+        }
         st.backoff_until = None;
         st.backoff_current_secs = 0;
     }
@@ -395,15 +438,28 @@ impl ClaudeProvider {
     }
 
     fn apply_backoff(&self, retry_after_secs: Option<u64>, now: i64) {
+        // Lock order: `limits`, then `observations`.
         let mut st = self
             .limits
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let has_window_data = self
+            .observations
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .has_window_data();
         let (until, current) = state::backoff_after_rate_limit(
             st.backoff_current_secs,
             retry_after_secs,
             self.config.min_endpoint_interval_secs,
+            has_window_data,
             now,
+        );
+        tracing::warn!(
+            ?retry_after_secs,
+            retry_in_secs = until - now,
+            has_window_data,
+            "claude oauth usage rate limited"
         );
         st.backoff_until = Some(until);
         st.backoff_current_secs = current;
@@ -547,6 +603,7 @@ impl Provider for ClaudeProvider {
                 RefreshOutcome::Failed(state::RATE_LIMITED_MESSAGE.to_string())
             }
             FetchOutcome::ServerError(code) => {
+                tracing::warn!(status = code, "claude oauth usage request failed");
                 let msg = format!("Claude usage endpoint returned HTTP {code}.");
                 self.set_last_outcome(LastOutcome::Failed(msg.clone()));
                 RefreshOutcome::Failed(msg)
@@ -697,5 +754,39 @@ impl Provider for ClaudeProvider {
             Ok(None) => Ok(()),
             Err(e) => Err(IngestError::Invalid(e)),
         }
+    }
+
+    fn saved_state(&self) -> Option<serde_json::Value> {
+        // Lock order: `limits`, then `observations`.
+        let limits = self
+            .limits
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let obs = self
+            .observations
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let saved = SavedLimits::capture(&limits, &obs);
+        if saved.is_empty() {
+            return None;
+        }
+        serde_json::to_value(saved)
+            .inspect_err(|error| tracing::warn!(%error, "cannot serialise the Claude limits"))
+            .ok()
+    }
+
+    fn restore_state(&self, saved: serde_json::Value, now: i64) {
+        let Some(saved) = SavedLimits::restore(saved, now) else {
+            return;
+        };
+        let mut limits = self
+            .limits
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut obs = self
+            .observations
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        saved.apply_to(&mut limits, &mut obs, now);
     }
 }

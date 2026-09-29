@@ -49,6 +49,10 @@ PlasmaExtras.Representation {
 
     readonly property var providers: snapshot && snapshot.providers ? snapshot.providers : []
     readonly property bool loading: providers.length > 0 && providers.every(provider => provider.state === "loading")
+    /*! Why the providers are still loading, when one says: a rate limit it is waiting out, say. */
+    readonly property string loadingMessage: loading
+        ? providers.filter(provider => !!provider.message).map(provider => provider.message).join("\n")
+        : ""
     readonly property bool hasContent: daemonRunning && providers.length > 0 && !loading
     /*! The daemon is up, but has published no provider at all. */
     readonly property bool noProviders: daemonRunning && !!snapshot && providers.length === 0
@@ -292,14 +296,18 @@ PlasmaExtras.Representation {
                 visible: root.waiting
                 iconName: "view-refresh"
                 text: i18nc("@info:placeholder", "Reading usage…")
-                // A wait this long is no longer a normal start-up, so say what to do.
-                explanation: root.waitedTooLong
-                    ? i18nc("@info:placeholder",
-                            "The service has not reported any usage yet.")
-                    : ""
+                // A reason from the daemon beats a guess. Without one, a wait
+                // this long is no longer a normal start-up, so say what to do.
+                explanation: root.loadingMessage.length > 0
+                    ? root.loadingMessage
+                    : root.waitedTooLong
+                        ? i18nc("@info:placeholder",
+                                "The service has not reported any usage yet.")
+                        : ""
 
                 helpfulAction: Kirigami.Action {
-                    enabled: root.waitedTooLong
+                    // A provider that gave a reason is already retrying on its own.
+                    enabled: root.waitedTooLong && root.loadingMessage.length === 0
                     visible: enabled
                     icon.name: "view-refresh"
                     text: i18nc("@action:button", "Try Again")

@@ -3,6 +3,23 @@ use std::path::{Path, PathBuf};
 use ts_claude::ClaudeEnv;
 use ts_core::config::ClaudeConfig;
 use ts_core::discovery::SearchEnv;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+/// A server that answers every `GET /api/oauth/usage` with `response`.
+#[allow(
+    dead_code,
+    reason = "compiled separately into every integration test binary; not every binary uses every item"
+)]
+pub async fn mock_oauth_usage(response: ResponseTemplate) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/oauth/usage"))
+        .respond_with(response)
+        .mount(&server)
+        .await;
+    server
+}
 
 /// A tempdir laid out as a Claude config dir, with a valid (far-future
 /// expiry) credentials file so tests don't race the real wall clock.

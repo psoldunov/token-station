@@ -8,6 +8,7 @@ mod labels;
 mod logs;
 mod oauth_usage;
 mod provider;
+mod saved;
 mod state;
 mod statusline;
 pub mod store;

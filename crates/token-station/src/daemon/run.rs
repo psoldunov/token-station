@@ -114,9 +114,11 @@ pub(crate) async fn build_daemon(
     .context("the daemon's startup work did not run")
 }
 
-/// The cached price table, the first refresh and the first pricing update.
+/// The cached price table, the saved plan limits, the first refresh and the
+/// first pricing update.
 pub(crate) async fn startup_work(daemon: Arc<Daemon>) {
     daemon.merge_pricing_cache().await;
+    daemon.restore_saved_limits().await;
     daemon.refresh_all(false).await;
     daemon.prune_history().await;
     daemon.refresh_pricing().await;
