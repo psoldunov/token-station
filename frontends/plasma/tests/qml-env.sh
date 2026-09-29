@@ -7,7 +7,10 @@
 # rather than hard-coding store paths that change on every rebuild.
 #
 # Source this from inside `nix develop`, where plasmoidviewer is on PATH.
-set -euo pipefail
+#
+# Deliberately sets no shell options: this file is sourced, and turning on
+# `errexit` here would turn it on in the caller too. live.sh runs commands that
+# are expected to fail (it reports on them instead of dying).
 
 viewer=$(command -v plasmoidviewer || true)
 if [[ -z "${viewer}" ]]; then

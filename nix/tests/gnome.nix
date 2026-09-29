@@ -153,11 +153,11 @@ pkgs.testers.runNixOSTest {
         machine.send_key("esc")
 
     with subtest("D-Bus activation starts the packaged unit"):
-        # Nothing pulls the unit in, so it is the D-Bus activation file that
-        # starts it: either from the extension's own call, or from this one.
+        # Nothing pulls the unit in and this probe never auto-starts it, so the
+        # daemon only appears if the extension's own activation call worked.
         machine.wait_until_succeeds(
             user(
-                "busctl --user get-property dev.soldunov.TokenStation "
+                "busctl --user --auto-start=no get-property dev.soldunov.TokenStation "
                 "/dev/soldunov/TokenStation dev.soldunov.TokenStation1 Snapshot"
             )
             + " | grep -q schemaVersion"

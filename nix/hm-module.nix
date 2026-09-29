@@ -115,6 +115,9 @@ in
             ExecStart = "${lib.getExe cfg.package} daemon";
             Restart = "on-failure";
             RestartSec = 5;
+            # 75 = another daemon already owns the bus name; restarting cannot help.
+            RestartPreventExitStatus = 75;
+            NoNewPrivileges = true;
             Environment = [ "PATH=${searchPath}" ];
           };
           Install.WantedBy = [ "graphical-session.target" ];

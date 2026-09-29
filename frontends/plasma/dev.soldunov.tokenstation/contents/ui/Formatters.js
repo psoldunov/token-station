@@ -94,7 +94,7 @@ function timeAgo(timestamp, nowSeconds) {
                  "%1 ago", duration(elapsed));
 }
 
-/*! "43.3 M", "680.4 K", "412", each written the way the locale writes numbers. */
+/*! "43.3 M", "680.4 k", "412", each written the way the locale writes numbers. */
 function tokens(value) {
     if (!isNumber(value)) {
         return unknown();
@@ -105,7 +105,7 @@ function tokens(value) {
     }
     if (abs < 1e6) {
         return i18nc("@item:intext Token count in thousands, %1 is the number",
-                     "%1 K", number(value / 1e3, 1));
+                     "%1 k", number(value / 1e3, 1));
     }
     if (abs < 1e9) {
         return i18nc("@item:intext Token count in millions, %1 is the number",

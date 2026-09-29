@@ -46,6 +46,12 @@ jobs:
       - uses: cachix/install-nix-action@v31
       - name: Build AppImage
         run: nix build -L .#appimage
+      - name: Smoke-test AppImage on a non-Nix system
+        shell: bash
+        run: |
+          ./result/TokenStation-${{ matrix.arch }}.AppImage --appimage-extract-and-run --version
+          ./result/TokenStation-${{ matrix.arch }}.AppImage --appimage-extract-and-run status --json > status.json
+          head -c 400 status.json
       - uses: actions/upload-artifact@v4
         with:
           name: TokenStation-${{ matrix.arch }}.AppImage

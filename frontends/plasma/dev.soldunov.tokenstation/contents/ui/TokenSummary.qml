@@ -62,8 +62,9 @@ ColumnLayout {
         visible: root.hasAccountTokens
         text: root.hasAccountTokens
             ? i18nc("@info Token usage the provider reports for the whole account",
-                    "All devices · today %1 tokens",
-                    Formatters.tokens(root.accountTokens.today))
+                    "All devices · today %1 tokens · 7 days %2",
+                    Formatters.tokens(root.accountTokens.today),
+                    Formatters.tokens(root.accountTokens.last7Days))
             : ""
     }
 

@@ -129,22 +129,22 @@ extension settings pages edit the same file through the daemon.
 
 ```toml
 [general]
-limits_interval_secs = 300    # plan-limit polling (>= 120)
-tokens_interval_secs = 60     # local log scanning
-history_retention_days = 35
+limits_interval_secs = 300    # plan-limit polling (120–86400)
+tokens_interval_secs = 60     # local log scanning (>= 15)
+history_retention_days = 35   # 1–366
 
 [meter]
 window = "most_constrained"   # most_constrained | session | weekly
 
 [alerts]
-warning_percent = 80
-critical_percent = 95
+warning_percent = 80          # 1–100, not above critical_percent
+critical_percent = 95         # 1–100
 notify = true                 # desktop notification when a threshold is crossed
 notify_on_reset = false
 
 [pricing]
 auto_update = true            # refresh LiteLLM prices daily (a bundled table is the fallback)
-url = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+url = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"  # must be https
 
 [claude]
 enabled = true
@@ -159,7 +159,7 @@ enabled = true
 binary = ""                   # default: discover `codex` on PATH and well-known directories
 homes = []                    # default: $CODEX_HOME, else ~/.codex
 process_mode = "on_demand"    # on_demand | persistent
-linger_secs = 60
+linger_secs = 60              # idle seconds before the app-server child stops (<= 3600)
 http_fallback = true
 ```
 

@@ -202,6 +202,8 @@ export class PopupContent {
         this._countdowns = [];
         this._sparklines = [];
         this._updaters = [];
+        // Late history replies must not reach the sparklines destroyed below.
+        this._historyGeneration++;
         // Fresh sparklines have nothing in them, so the throttle starts over.
         this._lastHistoryFetch = 0;
         this._providerSection.removeAll();
@@ -427,7 +429,10 @@ export class PopupContent {
         const {label, level, item, window} = entry;
         const percent = Number(window.usedPercent);
         const percentText = Number.isFinite(percent) ? formatPercent(percent) : null;
-        const resetText = formatResetsIn(Number(window.resetsAt));
+        // `resetsAt` is null after a window rolled over; Number(null) would be 0.
+        const resetsAt = window.resetsAt === null || window.resetsAt === undefined
+            ? NaN : Number(window.resetsAt);
+        const resetText = formatResetsIn(resetsAt);
         label.text = joinDots([percentText, resetText]);
 
         const name = joinCommas([
@@ -613,7 +618,9 @@ export class PopupContent {
      *   chatty daemon cannot turn into a stream of GetHistory calls.
      */
     _fetchHistory(force) {
-        if (this._sparklines.length === 0)
+        // Without a daemon every call would fail and log; the menu shows the
+        // "not running" state instead.
+        if (this._sparklines.length === 0 || !this._proxy.available)
             return;
         if (!force && now() - this._lastHistoryFetch < HISTORY_MIN_INTERVAL_SECONDS)
             return;

@@ -10,6 +10,9 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 
 export const BUS_NAME = 'dev.soldunov.TokenStation';
+
+/** How long a call that needs the daemon waits for D-Bus activation. */
+const OWNER_WAIT_MS = 5000;
 export const OBJECT_PATH = '/dev/soldunov/TokenStation';
 export const INTERFACE_NAME = 'dev.soldunov.TokenStation1';
 
@@ -110,6 +113,7 @@ export class DaemonProxy extends Emitter {
         super();
         this._proxy = null;
         this._propertiesChangedId = 0;
+        this._ownerChangedId = 0;
         this._watchId = 0;
         this._available = false;
         this._snapshot = null;
@@ -177,21 +181,73 @@ export class DaemonProxy extends Emitter {
         this._proxy = proxy;
         this._propertiesChangedId = this._proxy.connect(
             'g-properties-changed', () => this._readSnapshot());
+        // After a daemon (re)start GDBusProxy reloads the cached properties and
+        // then announces the new owner; read the snapshot at that point.
+        this._ownerChangedId = this._proxy.connect(
+            'notify::g-name-owner', () => this._readSnapshot());
         this._readSnapshot();
         return true;
     }
 
-    /** Ask the bus to start the daemon from its D-Bus service file. */
+    /**
+     * Ask the bus to start the daemon from its D-Bus service file.
+     *
+     * Uses an explicit callback: `Gio.DBusConnection.call` is only promisified
+     * inside gnome-shell, not in the preferences process.
+     */
     async _activate() {
         try {
-            await Gio.DBus.session.call(
-                'org.freedesktop.DBus', '/org/freedesktop/DBus',
-                'org.freedesktop.DBus', 'StartServiceByName',
-                new GLib.Variant('(su)', [BUS_NAME, 0]),
-                null, Gio.DBusCallFlags.NONE, -1, null);
+            await new Promise((resolve, reject) => {
+                Gio.DBus.session.call(
+                    'org.freedesktop.DBus', '/org/freedesktop/DBus',
+                    'org.freedesktop.DBus', 'StartServiceByName',
+                    new GLib.Variant('(su)', [BUS_NAME, 0]),
+                    null, Gio.DBusCallFlags.NONE, -1, null,
+                    (connection, result) => {
+                        try {
+                            resolve(connection.call_finish(result));
+                        } catch (e) {
+                            reject(e);
+                        }
+                    });
+            });
         } catch (e) {
             console.error(e, 'Token Station: cannot start the daemon');
         }
+    }
+
+    /**
+     * Resolve once the daemon owns its name, or after `timeoutMs`.
+     *
+     * @param {number} timeoutMs Upper bound on the wait.
+     * @returns {Promise<boolean>} Whether the daemon is running.
+     */
+    _waitForOwner(timeoutMs) {
+        return new Promise(resolve => {
+            if (this._proxy === null || this._proxy.g_name_owner !== null) {
+                resolve(this._proxy !== null);
+                return;
+            }
+            let signalId = 0;
+            const timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, timeoutMs, () => {
+                this._proxy?.disconnect(signalId);
+                resolve(false);
+                return GLib.SOURCE_REMOVE;
+            });
+            signalId = this._proxy.connect('notify::g-name-owner', () => {
+                if (this._proxy.g_name_owner === null)
+                    return;
+                this._proxy.disconnect(signalId);
+                GLib.source_remove(timeoutId);
+                resolve(true);
+            });
+        });
+    }
+
+    /** Make sure the daemon runs before a method call that needs it. */
+    async _ensureRunning() {
+        await this.retry();
+        await this._waitForOwner(OWNER_WAIT_MS);
     }
 
     /**
@@ -252,7 +308,7 @@ export class DaemonProxy extends Emitter {
 
     /** Ask every provider to refresh now, starting the daemon if it is down. */
     async refresh() {
-        await this.retry();
+        await this._ensureRunning();
         await this._call('RefreshRemote', []);
     }
 
@@ -283,6 +339,7 @@ export class DaemonProxy extends Emitter {
 
     /** Daemon configuration as a plain object (snake_case keys). */
     async getSettings() {
+        await this._ensureRunning();
         const [json] = await this._call('GetSettingsRemote', []);
         return JSON.parse(json);
     }
@@ -293,6 +350,7 @@ export class DaemonProxy extends Emitter {
      * @param {object} settings Full configuration; missing keys take defaults.
      */
     async setSettings(settings) {
+        await this._ensureRunning();
         await this._call('SetSettingsRemote', [JSON.stringify(settings)]);
     }
 
@@ -304,7 +362,10 @@ export class DaemonProxy extends Emitter {
         }
         if (this._proxy !== null && this._propertiesChangedId !== 0)
             this._proxy.disconnect(this._propertiesChangedId);
+        if (this._proxy !== null && this._ownerChangedId !== 0)
+            this._proxy.disconnect(this._ownerChangedId);
         this._propertiesChangedId = 0;
+        this._ownerChangedId = 0;
         this._proxy = null;
         this._snapshot = null;
         this._available = false;
