@@ -1,5 +1,5 @@
 /*
-    SPDX-FileCopyrightText: 2026 Philipp Soldunov <philipp@theswisscheese.com>
+    SPDX-FileCopyrightText: 2026 Philipp Soldunov <69530789+psoldunov@users.noreply.github.com>
     SPDX-License-Identifier: MIT
 
     Popup: optional heading, one scrollable section per provider, "updated" footer.
