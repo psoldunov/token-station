@@ -38,6 +38,41 @@ pub async fn daemon_is_running(connection: &zbus::Connection) -> bool {
     }
 }
 
+/// Run `work` on a session bus from a synchronous caller.
+///
+/// `setup` and `uninstall` have no runtime of their own, so this builds a
+/// one-thread one for the call. `bus_address` names the bus to use; `None`
+/// takes the one in the environment.
+///
+/// # Errors
+///
+/// Returns a message when the runtime cannot be built, when `bus_address` is
+/// not a usable address or that bus cannot be connected to, plus whatever
+/// `work` itself reports.
+pub fn with_session_bus_blocking<T, F, Fut>(bus_address: Option<&str>, work: F) -> Result<T, String>
+where
+    F: FnOnce(zbus::Connection) -> Fut,
+    Fut: std::future::Future<Output = zbus::Result<T>>,
+{
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    runtime.block_on(async {
+        let connection = match bus_address {
+            Some(address) => zbus::connection::Builder::address(address)
+                .map_err(|e| e.to_string())?
+                .build()
+                .await
+                .map_err(|e| e.to_string())?,
+            None => zbus::Connection::session()
+                .await
+                .map_err(|e| e.to_string())?,
+        };
+        work(connection).await.map_err(|e| e.to_string())
+    })
+}
+
 /// A proxy for the daemon at its well-known address.
 ///
 /// # Errors

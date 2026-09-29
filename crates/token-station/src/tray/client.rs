@@ -9,7 +9,7 @@ use futures_util::StreamExt;
 use tokio::sync::mpsc::UnboundedSender;
 use ts_core::Snapshot;
 
-use crate::dbus::client::{connect, daemon_is_running};
+use crate::dbus::client::{connect, daemon_is_running, with_session_bus_blocking};
 use crate::dbus::{BUS_NAME, INTERFACE_NAME, OBJECT_PATH};
 use crate::tray::palette::ColorScheme;
 use crate::tray::portal::{self, SettingsProxy};
@@ -109,26 +109,11 @@ pub async fn request_quit(connection: &zbus::Connection) -> zbus::Result<bool> {
 ///
 /// # Errors
 ///
-/// Returns a message when the one-thread runtime cannot be built, when
-/// `bus_address` is not a usable address or that bus cannot be connected to,
-/// plus whatever [`request_quit`] itself reports.
+/// Returns a message when the bus cannot be reached (see
+/// [`with_session_bus_blocking`]), plus whatever [`request_quit`] itself reports.
 pub fn request_quit_blocking(bus_address: Option<&str>) -> Result<bool, String> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| e.to_string())?;
-    runtime.block_on(async {
-        let connection = match bus_address {
-            Some(address) => zbus::connection::Builder::address(address)
-                .map_err(|e| e.to_string())?
-                .build()
-                .await
-                .map_err(|e| e.to_string())?,
-            None => zbus::Connection::session()
-                .await
-                .map_err(|e| e.to_string())?,
-        };
-        request_quit(&connection).await.map_err(|e| e.to_string())
+    with_session_bus_blocking(bus_address, |connection| async move {
+        request_quit(&connection).await
     })
 }
 
