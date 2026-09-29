@@ -1,4 +1,4 @@
-//! `token-station tray`: a StatusNotifierItem for desktops with no native front end.
+//! `token-station tray`: a `StatusNotifierItem` for desktops with no native front end.
 //!
 //! The tray owns no data. It follows the daemon's snapshot and the desktop colour
 //! scheme, and redraws the meter only when one of those actually changes.
@@ -41,7 +41,7 @@ pub enum Action {
     Quit,
 }
 
-/// The StatusNotifierItem.
+/// The `StatusNotifierItem`.
 pub struct TokenStationTray {
     snapshot: Option<Box<Snapshot>>,
     scheme: ColorScheme,
@@ -233,6 +233,12 @@ async fn claim_tray_name(
 }
 
 /// Run the tray until "Quit" or a fatal bus error.
+///
+/// # Errors
+///
+/// Returns an error when there is no session bus, when asking for the tray's own
+/// bus name fails, or when the `StatusNotifierItem` cannot be published. Finding
+/// another tray already running is not an error: this one returns instead.
 pub async fn run() -> anyhow::Result<()> {
     let connection = zbus::Connection::session()
         .await
@@ -297,18 +303,18 @@ mod tests {
 
     const NOW: i64 = 1_790_596_800;
 
-    fn fixture(name: &str) -> Box<Snapshot> {
+    fn fixture(name: &str) -> Snapshot {
         let json = std::fs::read_to_string(format!(
             concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/fixtures/{}.json"),
             name
         ))
         .expect("fixture reads");
-        Box::new(serde_json::from_str(&json).expect("fixture parses"))
+        serde_json::from_str(&json).expect("fixture parses")
     }
 
     fn tray(name: Option<&str>) -> (TokenStationTray, UnboundedReceiver<Action>) {
         let (actions, rx) = unbounded_channel();
-        let snapshot = name.map(fixture);
+        let snapshot = name.map(|name| Box::new(fixture(name)));
         (
             TokenStationTray::new(snapshot, ColorScheme::Light, actions, fixed_clock(NOW)),
             rx,
@@ -380,12 +386,14 @@ mod tests {
         // Same meter, different token counts: the icon must not move.
         let mut same_meter = fixture("snapshot-ok");
         same_meter.revision = 99;
-        tray.apply(Update::Daemon(Some(same_meter)));
+        tray.apply(Update::Daemon(Some(Box::new(same_meter))));
         assert_eq!(tray.rendered, rendered);
         assert_eq!(tray.icons, before);
 
         // A different meter redraws.
-        tray.apply(Update::Daemon(Some(fixture("snapshot-near-limit"))));
+        tray.apply(Update::Daemon(Some(Box::new(fixture(
+            "snapshot-near-limit",
+        )))));
         assert_ne!(tray.icons, before);
     }
 
@@ -417,7 +425,7 @@ mod tests {
         snapshot.providers[0].name = "Claude_Code".into();
         let (actions, _rx) = unbounded_channel();
         let tray = TokenStationTray::new(
-            Some(snapshot),
+            Some(Box::new(snapshot)),
             ColorScheme::Light,
             actions,
             fixed_clock(NOW),

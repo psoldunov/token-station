@@ -33,6 +33,10 @@ const WRAP_POLL: Duration = Duration::from_millis(5);
 const WRAP_GRACE: Duration = Duration::from_millis(200);
 
 /// Read at most `cap` bytes; anything beyond is dropped.
+///
+/// # Errors
+///
+/// Returns the underlying [`std::io::Error`] when `source` fails mid-read.
 pub fn read_capped(source: &mut impl Read, cap: usize) -> std::io::Result<Vec<u8>> {
     let mut buffer = Vec::new();
     source.take(cap as u64 + 1).read_to_end(&mut buffer)?;
@@ -41,6 +45,7 @@ pub fn read_capped(source: &mut impl Read, cap: usize) -> std::io::Result<Vec<u8
 }
 
 /// The longest prefix of `text` that is at most `cap` bytes and still valid UTF-8.
+#[must_use]
 pub fn truncate_to(text: &str, cap: usize) -> &str {
     if text.len() <= cap {
         return text;
@@ -55,6 +60,10 @@ pub fn truncate_to(text: &str, cap: usize) -> &str {
 /// The one-line summary printed when no wrapped command produces output.
 ///
 /// Prefers the plan windows Claude Code reports; falls back to the model name.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a rounded percentage is far inside i64; `as` saturates anything out of range"
+)]
 pub fn compact_line(payload: &str) -> String {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
         return String::new();
@@ -82,6 +91,7 @@ pub fn compact_line(payload: &str) -> String {
 }
 
 /// `5h 34% · 7d 15% · resets in 2h 14m` — used when a reset time is known.
+#[must_use]
 pub fn compact_line_with_reset(payload: &str, resets_in: Option<i64>) -> String {
     let base = compact_line(payload);
     match resets_in.filter(|s| *s > 0) {
@@ -93,6 +103,12 @@ pub fn compact_line_with_reset(payload: &str, resets_in: Option<i64>) -> String 
 }
 
 /// Hand the payload to the daemon, with a short timeout.
+///
+/// # Errors
+///
+/// Returns a message when the session bus is unreachable, when the daemon proxy
+/// cannot be built, when the call does not answer within [`CALL_TIMEOUT`], or
+/// when the daemon rejects the payload.
 pub async fn deliver(payload: &str) -> Result<(), String> {
     let connection = zbus::Connection::session()
         .await
@@ -107,6 +123,11 @@ pub async fn deliver(payload: &str) -> Result<(), String> {
 }
 
 /// Blocking wrapper: a one-thread runtime just for this call.
+///
+/// # Errors
+///
+/// Returns a message when the one-thread runtime cannot be built, plus whatever
+/// [`deliver`] itself reports.
 pub fn deliver_blocking(payload: &str) -> Result<(), String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -116,6 +137,11 @@ pub fn deliver_blocking(payload: &str) -> Result<(), String> {
 }
 
 /// Leave the payload where the daemon will find it on its next tokens tick.
+///
+/// # Errors
+///
+/// Returns a message when `path` cannot be created, written or renamed into
+/// place.
 pub fn drop_to_disk(path: &Path, payload: &str) -> Result<(), String> {
     write_atomic(path, payload.as_bytes())
         .map_err(|e| format!("cannot write {}: {e}", path.display()))
@@ -208,6 +234,7 @@ fn kill_group(child: &mut Child) {
 /// Both halves are bounded: the wait, and the handover of what was read. Claude
 /// Code runs this on every turn, so neither a slow command nor a grandchild
 /// holding the pipe open may keep the status line waiting past `timeout`.
+#[must_use]
 pub fn finish_wrapped(mut wrapped: Wrapped, timeout: Duration) -> Vec<u8> {
     let deadline = Instant::now() + timeout;
     let exited = wait_or_kill(&mut wrapped.child, deadline);
@@ -262,6 +289,7 @@ fn take_output(stdout: &Receiver<Vec<u8>>, child: &mut Child, budget: Duration) 
 }
 
 /// Run `sh -c command` with `stdin` and return its stdout, whatever it exits with.
+#[must_use]
 pub fn run_wrapped(command: &str, stdin: &[u8], timeout: Duration) -> Vec<u8> {
     match spawn_wrapped(command, stdin) {
         Some(wrapped) => finish_wrapped(wrapped, timeout),

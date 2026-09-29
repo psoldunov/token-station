@@ -35,7 +35,10 @@ impl Coalescer {
         let start = *updates.borrow_and_update();
 
         let leader = {
-            let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+            let mut running = self
+                .running
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let free = !*running;
             *running = true;
             free
@@ -69,7 +72,10 @@ struct Release<'a> {
 
 impl Drop for Release<'_> {
     fn drop(&mut self) {
-        *self.running.lock().unwrap_or_else(|e| e.into_inner()) = false;
+        *self
+            .running
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = false;
         self.generation.send_modify(|value| *value += 1);
     }
 }

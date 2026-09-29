@@ -27,6 +27,7 @@ pub struct CodexEnv {
 
 impl CodexEnv {
     /// The real process environment.
+    #[must_use]
     pub fn current() -> CodexEnv {
         CodexEnv {
             home: ts_core::discovery::home_dir(),

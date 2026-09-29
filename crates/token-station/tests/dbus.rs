@@ -42,14 +42,17 @@ impl Backend for FakeBackend {
     fn settings_json(&self) -> String {
         self.settings
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .to_json()
     }
 
     async fn set_settings(&self, json: &str) -> Result<(), SetSettingsError> {
         let next =
             token_station::settings::parse_settings(json).map_err(SetSettingsError::Rejected)?;
-        *self.settings.lock().unwrap_or_else(|e| e.into_inner()) = next;
+        *self
+            .settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
         Ok(())
     }
 
@@ -60,7 +63,7 @@ impl Backend for FakeBackend {
         *self
             .last_statusline
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(payload.to_string());
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(payload.to_string());
         Ok(())
     }
 }
@@ -124,8 +127,8 @@ async fn properties_are_served_and_changes_are_signalled() {
     // The stream replays the cached value first, so read until the new one lands.
     let value = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let changed = next(&mut changes).await.expect("stream is live");
-            let json = changed.get().await.expect("property readable");
+            let property = next(&mut changes).await.expect("stream is live");
+            let json = property.get().await.expect("property readable");
             let value: serde_json::Value = serde_json::from_str(&json).unwrap();
             if value["providers"][0]["state"] == "ok" {
                 return value;
@@ -194,6 +197,10 @@ async fn get_history_answers_json_and_rejects_unknown_windows() {
     }
 }
 
+#[expect(
+    clippy::float_cmp,
+    reason = "compares exact literals that never went through arithmetic"
+)]
 #[tokio::test(flavor = "multi_thread")]
 async fn settings_round_trip_and_invalid_input_lists_every_problem() {
     let bus = private_bus_or_skip!();

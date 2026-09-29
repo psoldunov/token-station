@@ -11,11 +11,17 @@ pub const APPLET_ID: &str = "dev.soldunov.tokenstation";
 pub const PAYLOAD: &str = "plasma";
 
 /// Where the applet is installed.
+#[must_use]
 pub fn target(dirs: &Dirs) -> PathBuf {
     dirs.data.join("plasma/plasmoids").join(APPLET_ID)
 }
 
 /// Copy the applet out of `payload` (the `integrations` directory).
+///
+/// # Errors
+///
+/// Returns an error when `payload` holds no Plasma applet directory, which means
+/// the caller needs `--payload-dir` or the `AppImage`.
 pub fn steps(payload: &Path, dirs: &Dirs) -> anyhow::Result<Vec<Step>> {
     let source = payload.join(PAYLOAD);
     if !source.is_dir() {

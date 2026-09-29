@@ -30,6 +30,17 @@ jobs:
       - name: nix flake check
         run: nix flake check -L --keep-going
 
+  # The RustSec database is fetched at run time, which the `nix flake check`
+  # sandbox cannot do. A newly published advisory can fail this job without a
+  # code change; fix it by updating the crate or listing it in deny.toml.
+  advisories:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: cargo deny check advisories
+        run: nix shell --inputs-from . nixpkgs#cargo nixpkgs#cargo-deny -c cargo deny --locked check advisories
+
   appimage:
     runs-on: ubuntu-24.04
     steps:

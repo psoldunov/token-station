@@ -28,6 +28,10 @@ pub enum PersistError {
 
 /// Which parts of the daemon a config replacement invalidates.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "one independent dirty flag per subsystem; a bitflags type would not read better at the call sites"
+)]
 pub struct ConfigChange {
     /// The Claude provider must be rebuilt.
     pub claude: bool,
@@ -45,17 +49,20 @@ pub struct ConfigChange {
 
 impl ConfigChange {
     /// Nothing at all changed.
+    #[must_use]
     pub fn is_empty(self) -> bool {
         self == ConfigChange::default()
     }
 
     /// A new snapshot has to be published.
+    #[must_use]
     pub fn needs_republish(self) -> bool {
         self.claude || self.codex || self.alerts || self.meter
     }
 }
 
 /// Compare two configs section by section.
+#[must_use]
 pub fn diff(old: &Config, new: &Config) -> ConfigChange {
     ConfigChange {
         claude: old.claude != new.claude,
@@ -70,6 +77,11 @@ pub fn diff(old: &Config, new: &Config) -> ConfigChange {
 /// Parse settings JSON as `SetSettings` receives it.
 ///
 /// Returns every problem at once, so the D-Bus error can list them all.
+///
+/// # Errors
+///
+/// Returns one message per out-of-bounds value, or a single message when `json`
+/// is not valid JSON for the settings schema.
 pub fn parse_settings(json: &str) -> Result<Config, Vec<String>> {
     Config::from_json(json).map_err(|error| match error {
         ConfigError::Invalid(problems) => problems,
@@ -82,6 +94,12 @@ pub fn parse_settings(json: &str) -> Result<Config, Vec<String>> {
 /// A symlink or a read-only file is somebody else's to change: renaming over it
 /// would replace a `/nix/store` link and the next rebuild would undo the change
 /// anyway, so it is refused instead.
+///
+/// # Errors
+///
+/// Returns [`PersistError::Managed`] when `path` is a symlink or read-only, and
+/// [`PersistError::Write`] when the config cannot be serialized to TOML or the
+/// atomic replace fails.
 pub fn persist(config: &Config, path: &Path) -> Result<(), PersistError> {
     if let Err(Unwritable::Symlink | Unwritable::ReadOnly) = check_replaceable(path) {
         return Err(PersistError::Managed);
@@ -215,6 +233,10 @@ mod tests {
         assert!(error.to_string().contains("cannot write"), "{error}");
     }
 
+    #[expect(
+        clippy::float_cmp,
+        reason = "compares exact literals that never went through arithmetic"
+    )]
     #[test]
     fn reload_keeps_the_old_config_when_the_file_is_broken() {
         let dir = tempfile::tempdir().unwrap();

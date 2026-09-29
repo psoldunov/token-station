@@ -267,6 +267,12 @@ impl Daemon {
     /// and refreshing prices then happens on its own task, after the lock is
     /// released: both talk to the network, and a `SetSettings` reply that waits for
     /// them arrives after the caller's own D-Bus timeout has expired.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SetSettingsError`] when `persist` is set and `config.toml`
+    /// cannot be written. A config that changes nothing is accepted without a
+    /// write.
     pub async fn apply_config(&self, next: Config, persist: bool) -> Result<(), SetSettingsError> {
         let (rebuilt, pricing) = {
             let _serialised = self.apply_lock.lock().await;
@@ -395,6 +401,12 @@ impl Daemon {
     }
 
     /// Forward a statusline payload to the Claude provider as seen at `observed_at`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when the Claude provider is not configured, or when it
+    /// rejects the payload as unreadable. A provider that accepts no pushed data
+    /// at all is not an error: the payload is dropped.
     pub fn ingest_statusline(&self, payload: &str, observed_at: i64) -> Result<(), String> {
         let Some(provider) = self.provider(ProviderId::Claude) else {
             return Err("the Claude provider is not available".into());
@@ -503,13 +515,17 @@ fn load_alert_state(path: &std::path::Path) -> AlertState {
 }
 
 fn read<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
-    lock.read().unwrap_or_else(|e| e.into_inner())
+    lock.read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn write<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
-    lock.write().unwrap_or_else(|e| e.into_inner())
+    lock.write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|e| e.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }

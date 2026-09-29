@@ -14,6 +14,7 @@ pub struct DisabledProvider {
 }
 
 impl DisabledProvider {
+    #[must_use]
     pub fn new(id: ProviderId) -> DisabledProvider {
         DisabledProvider { id }
     }

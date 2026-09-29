@@ -58,6 +58,12 @@ pub trait Provider: Send + Sync {
     }
 
     /// Accept externally pushed data.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IngestError::Unsupported`] when the provider accepts no pushed
+    /// data, which is the default, and an implementation-specific variant when
+    /// the payload itself is rejected.
     fn ingest(&self, payload: Ingest, now: i64) -> Result<(), IngestError> {
         let _ = (payload, now);
         Err(IngestError::Unsupported)

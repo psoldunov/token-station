@@ -32,6 +32,7 @@ pub struct Plan {
 }
 
 /// The copy taken next to `settings` before the first patch.
+#[must_use]
 pub fn backup_path(settings: &Path) -> PathBuf {
     let mut backup = settings.as_os_str().to_os_string();
     backup.push(BACKUP_SUFFIX);
@@ -47,6 +48,7 @@ pub fn settings_path(env: &Env, config_dir: Option<&str>) -> PathBuf {
 }
 
 /// Wrap `value` in single quotes, POSIX style.
+#[must_use]
 pub fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
@@ -83,7 +85,7 @@ fn tokenize(command: &str) -> Vec<String> {
     words
 }
 
-/// Is `program` this binary, or an AppImage of it?
+/// Is `program` this binary, or an `AppImage` of it?
 ///
 /// `<something> statusline` is not enough on its own: `ccusage statusline` is a
 /// different tool with the same subcommand, and treating it as ours would drop the
@@ -118,6 +120,7 @@ pub fn parse_ours(command: &str) -> Option<Option<String>> {
 }
 
 /// `'<exec>' statusline [--wrap '<wrapped>']`.
+#[must_use]
 pub fn build_command(exec: &Path, wrapped: Option<&str>) -> String {
     let base = format!("{} statusline", quote(&exec.to_string_lossy()));
     match wrapped {
@@ -170,6 +173,11 @@ fn check_writable(path: &Path) -> anyhow::Result<()> {
 }
 
 /// Decide the patch without writing anything.
+///
+/// # Errors
+///
+/// Returns an error when `settings` is a symlink or read-only, or when it exists
+/// but does not hold a JSON object.
 pub fn plan(settings: &Path, exec: &Path) -> anyhow::Result<Plan> {
     check_writable(settings)?;
     let members = read_object(settings)?;
@@ -230,6 +238,12 @@ fn wrapped_command(members: &Members) -> Option<String> {
 
 /// Apply the patch. `recorded` is the manifest entry from an earlier run, whose
 /// `previous` value survives every re-run.
+///
+/// # Errors
+///
+/// Returns an error when the settings file is a symlink or read-only, does not
+/// hold a JSON object, cannot be copied to its backup, or cannot be written
+/// back.
 pub fn apply(plan: &Plan, recorded: Option<&ClaudeRecord>) -> anyhow::Result<ClaudeRecord> {
     check_writable(&plan.settings)?;
     let mut members = read_object(&plan.settings)?;
@@ -259,6 +273,11 @@ pub fn apply(plan: &Plan, recorded: Option<&ClaudeRecord>) -> anyhow::Result<Cla
 /// Put back what was there before, unless someone changed it since.
 ///
 /// Returns `false` when the current value is no longer ours and was left alone.
+///
+/// # Errors
+///
+/// Returns an error when the settings file has since become a symlink or gone
+/// read-only, no longer holds a JSON object, or cannot be written back.
 pub fn restore(record: &ClaudeRecord) -> anyhow::Result<bool> {
     // The file may have become a symlink or gone read-only since `setup` ran.
     check_writable(&record.settings)?;
@@ -503,22 +522,22 @@ mod tests {
     #[test]
     fn restore_puts_back_exactly_what_was_there_before() {
         // A status line that existed comes back; one that did not is removed again.
-        let (_dir, had_one) = settings_with(
+        let (_dir, with_line) = settings_with(
             r#"{"model": "opus", "statusLine": {"type": "command", "command": "starship"}}"#,
         );
-        let (_dir2, had_none) = settings_with(r#"{"model": "opus"}"#);
-        for path in [&had_one, &had_none] {
+        let (_dir2, without_line) = settings_with(r#"{"model": "opus"}"#);
+        for path in [&with_line, &without_line] {
             let record = apply(&plan(path, Path::new(EXEC)).unwrap(), None).unwrap();
             assert!(restore(&record).unwrap(), "{}", path.display());
             assert_eq!(read(path)["model"], "opus", "every other key survives");
         }
-        assert_eq!(read(&had_one)["statusLine"]["command"], "starship");
-        assert!(read(&had_none).get("statusLine").is_none());
+        assert_eq!(read(&with_line)["statusLine"]["command"], "starship");
+        assert!(read(&without_line).get("statusLine").is_none());
     }
 
     #[test]
     fn restore_leaves_a_status_line_someone_else_changed() {
-        let (_dir, path) = settings_with(r#"{}"#);
+        let (_dir, path) = settings_with(r"{}");
         let record = apply(&plan(&path, Path::new(EXEC)).unwrap(), None).unwrap();
         std::fs::write(
             &path,

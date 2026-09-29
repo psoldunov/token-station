@@ -21,6 +21,11 @@ pub enum Unwritable {
 ///
 /// Renaming over a symlink silently replaces the link, which is how a
 /// declaratively managed file (a `/nix/store` symlink, say) gets clobbered.
+///
+/// # Errors
+///
+/// Returns [`Unwritable::Symlink`] when `path` is a symlink and
+/// [`Unwritable::ReadOnly`] when it is a file with no write bit set.
 pub fn check_replaceable(path: &Path) -> Result<(), Unwritable> {
     let Ok(meta) = std::fs::symlink_metadata(path) else {
         return Ok(());
@@ -39,6 +44,12 @@ pub fn check_replaceable(path: &Path) -> Result<(), Unwritable> {
 /// The rename is atomic, so readers see either the old or the new file. An
 /// existing file keeps its permission bits, so rewriting a `0600` file does not
 /// widen it to the default `0644`.
+///
+/// # Errors
+///
+/// Returns the underlying [`std::io::Error`] when the parent directories cannot
+/// be created, the temporary file cannot be created, written or fsynced, or the
+/// rename over `path` fails. The temporary file is removed on every failure.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let parent = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(parent)?;
@@ -63,8 +74,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 fn temp_name(path: &Path) -> String {
     let name = path
         .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "file".into());
+        .map_or_else(|| "file".into(), |n| n.to_string_lossy().into_owned());
     let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     format!(".{name}.{}.{sequence}.tmp", std::process::id())
 }
@@ -76,6 +86,7 @@ fn existing_mode(path: &Path) -> Option<u32> {
 }
 
 /// Modification time of `path` in whole Unix seconds, if it exists.
+#[must_use]
 pub fn modified_secs(path: &Path) -> Option<i64> {
     let modified = std::fs::metadata(path).ok()?.modified().ok()?;
     let since = modified
@@ -119,6 +130,7 @@ pub struct Fingerprint {
 }
 
 /// Fingerprint `path`, or `None` when nothing is there.
+#[must_use]
 pub fn fingerprint(path: &Path) -> Option<Fingerprint> {
     let link = std::fs::symlink_metadata(path).ok()?;
     let target = if link.file_type().is_symlink() {
@@ -165,7 +177,13 @@ mod tests {
         let second = temp_name(path);
         assert_ne!(first, second);
         assert!(first.starts_with(".settings.json."), "{first}");
-        assert!(first.ends_with(".tmp"), "{first}");
+        assert_eq!(
+            Path::new(&first)
+                .extension()
+                .and_then(std::ffi::OsStr::to_str),
+            Some("tmp"),
+            "{first}"
+        );
     }
 
     #[test]

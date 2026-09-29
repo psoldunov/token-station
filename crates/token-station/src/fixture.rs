@@ -44,6 +44,11 @@ pub struct FixturePlayer {
 
 impl FixturePlayer {
     /// Read a snapshot fixture from disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FixtureError::Read`] when `path` cannot be read and
+    /// [`FixtureError::Parse`] when its contents are not a valid snapshot.
     pub fn read_snapshot(path: &Path) -> Result<Snapshot, FixtureError> {
         let text = std::fs::read_to_string(path).map_err(|source| FixtureError::Read {
             path: path.display().to_string(),
@@ -55,6 +60,12 @@ impl FixturePlayer {
         })
     }
 
+    /// Read the fixture at `path` and start a player over it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FixtureError::Read`] when `path` cannot be read and
+    /// [`FixtureError::Parse`] when its contents are not a valid snapshot.
     pub fn load(
         path: &Path,
         config: Config,
@@ -84,7 +95,7 @@ impl FixturePlayer {
     fn config(&self) -> Config {
         self.config
             .read()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
 
@@ -126,6 +137,11 @@ fn shift(base: &Snapshot, config: &Config, revision: u64, now: i64) -> Snapshot 
 ///
 /// Fixture history must look plausible and never change between runs, so front ends
 /// can screenshot it: the shape depends only on the window id and the time range.
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    reason = "fixture timestamps and point indices are far below 2^53; the offset is truncated to whole seconds on purpose"
+)]
 pub fn synthetic_series(
     window_id: &str,
     end_percent: f64,
@@ -173,7 +189,10 @@ impl Backend for FixturePlayer {
     /// Applied in memory only: fixture mode never writes the user's config.
     async fn set_settings(&self, json: &str) -> Result<(), SetSettingsError> {
         let next = settings::parse_settings(json).map_err(SetSettingsError::Rejected)?;
-        *self.config.write().unwrap_or_else(|e| e.into_inner()) = next;
+        *self
+            .config
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
         self.republish().await;
         Ok(())
     }

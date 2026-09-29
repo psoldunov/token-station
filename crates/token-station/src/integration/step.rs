@@ -53,6 +53,7 @@ pub enum Step {
 
 impl Step {
     /// One line describing what this step would do.
+    #[must_use]
     pub fn describe(&self) -> String {
         match self {
             Step::CopyTree { source, target } => {
@@ -115,6 +116,7 @@ pub struct Outcome {
 
 impl Outcome {
     /// Did `program` run successfully?
+    #[must_use]
     pub fn succeeded(&self, program: &str) -> bool {
         self.ran
             .iter()
@@ -131,6 +133,13 @@ impl Outcome {
 /// power (or being killed) halfway through leaves a manifest describing exactly
 /// what is on disk, which is what `uninstall` needs to undo it; `None` keeps
 /// nothing, which is what `uninstall`'s own stop steps want.
+///
+/// # Errors
+///
+/// Returns the first step's error and stops there: a file or directory that
+/// cannot be written, a tree that cannot be copied, or a command that cannot be
+/// spawned or exits non-zero. The manifest still describes everything that did
+/// land, so `uninstall` can undo a half-finished run.
 pub fn execute(
     steps: &[Step],
     manifest: &mut Manifest,

@@ -5,6 +5,7 @@ use crate::meter::compute_meter;
 use crate::snapshot::{Level, ProviderId, ProviderSnapshot, SCHEMA_VERSION, Snapshot, UsageWindow};
 
 /// Order providers, classify every window against the thresholds and compute the meter.
+#[must_use]
 pub fn assemble(
     revision: u64,
     now: i64,

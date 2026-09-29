@@ -21,6 +21,7 @@ pub struct Published {
 ///
 /// Those two fields move on every assembly, so comparing them would publish a new
 /// revision every tick and wake every front end for nothing.
+#[must_use]
 pub fn content_equal(a: &Snapshot, b: &Snapshot) -> bool {
     a.schema_version == b.schema_version && a.meter == b.meter && a.providers == b.providers
 }
@@ -33,6 +34,7 @@ pub struct Publisher {
 
 impl Publisher {
     /// Start at revision 1 with `initial`.
+    #[must_use]
     pub fn new(initial: Snapshot) -> Arc<Publisher> {
         Arc::new(Publisher {
             state: RwLock::new(Published {
@@ -45,7 +47,10 @@ impl Publisher {
     }
 
     fn read(&self) -> Published {
-        self.state.read().unwrap_or_else(|e| e.into_inner()).clone()
+        self.state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub fn revision(&self) -> u64 {
@@ -69,7 +74,10 @@ impl Publisher {
     ///
     /// Returns the new revision, or `None` when nothing changed.
     pub fn store(&self, next: Snapshot) -> Option<u64> {
-        let mut guard = self.state.write().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self
+            .state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if content_equal(&guard.snapshot, &next) {
             return None;
         }

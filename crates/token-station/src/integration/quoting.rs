@@ -49,6 +49,7 @@ pub const DBUS: Rules = Rules {
 };
 
 /// Wrap `value` in double quotes, following `rules`.
+#[must_use]
 pub fn quoted(value: &str, rules: &Rules) -> String {
     let mut inner = String::with_capacity(value.len());
     for ch in value.chars() {

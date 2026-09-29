@@ -18,6 +18,7 @@ const BINDIR_PLACEHOLDER: &str = "@bindir@/token-station";
 const TEMPLATE: &str = include_str!("../../../../data/dbus/dev.soldunov.TokenStation.service.in");
 
 /// Where the activation file is installed.
+#[must_use]
 pub fn service_path(dirs: &Dirs) -> PathBuf {
     dirs.data.join("dbus-1/services").join(SERVICE_FILE)
 }
@@ -30,11 +31,13 @@ const SYSTEMD_KEY: &str = "SystemdService=";
 /// Deliberately not systemd's quoting: `dbus-daemon` has no specifiers, so a `%`
 /// doubled for systemd's benefit would be passed through as two per-cent signs and
 /// the activation would fail on any path containing one.
+#[must_use]
 pub fn quote_exec(value: &str) -> String {
     quoting::quoted(value, &quoting::DBUS)
 }
 
 /// The activation file for `exec`.
+#[must_use]
 pub fn service_text(exec: &Path) -> String {
     let quoted = quote_exec(&exec.to_string_lossy());
     let mut text = TEMPLATE.replace(BINDIR_PLACEHOLDER, &quoted);
@@ -43,12 +46,15 @@ pub fn service_text(exec: &Path) -> String {
     }
     // A second key would be read as a duplicate and the file rejected.
     if !text.lines().any(|line| line.starts_with(SYSTEMD_KEY)) {
-        text.push_str(&format!("{SYSTEMD_KEY}{UNIT}\n"));
+        text.push_str(SYSTEMD_KEY);
+        text.push_str(UNIT);
+        text.push('\n');
     }
     text
 }
 
 /// Write the activation file.
+#[must_use]
 pub fn steps(dirs: &Dirs, exec: &Path) -> Vec<Step> {
     vec![Step::Write {
         target: service_path(dirs),

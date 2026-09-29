@@ -36,6 +36,11 @@ fn panel(scheme: ColorScheme) -> Rgba {
 }
 
 /// ARGB32 over an opaque background, as RGBA8 rows.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the composited channel is rounded and cannot leave 0.0..=255.0"
+)]
 fn composite(pixmap: &icon::Pixmap, background: Rgba) -> Vec<u8> {
     let mut rgba = Vec::with_capacity(pixmap.argb.len());
     for pixel in pixmap.argb.chunks_exact(4) {

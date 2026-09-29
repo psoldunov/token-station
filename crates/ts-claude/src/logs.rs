@@ -71,8 +71,7 @@ fn file_mtime(meta: &std::fs::Metadata) -> i64 {
     meta.modified()
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
 fn collect_jsonl_files(root: &Path) -> Vec<PathBuf> {
@@ -126,7 +125,7 @@ fn scan_file(path: &Path, prior: Option<&FileState>) -> Option<(Vec<TokenEvent>,
     let start_offset = if reset {
         0
     } else {
-        prior.map(|p| p.offset).unwrap_or(0)
+        prior.map_or(0, |p| p.offset)
     };
 
     file.seek(SeekFrom::Start(start_offset)).ok()?;
@@ -136,9 +135,8 @@ fn scan_file(path: &Path, prior: Option<&FileState>) -> Option<(Vec<TokenEvent>,
     loop {
         let mut line = Vec::new();
         let n = match reader.read_until(b'\n', &mut line) {
-            Ok(0) => break,
+            Ok(0) | Err(_) => break,
             Ok(n) => n,
-            Err(_) => break,
         };
         if line.last() != Some(&b'\n') {
             break; // incomplete trailing line: wait for the next scan
@@ -441,7 +439,6 @@ mod tests {
     fn unix_seconds_now() -> i64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0)
+            .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
     }
 }

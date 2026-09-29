@@ -41,7 +41,7 @@ async fn serve_fake_server(connection: zbus::Connection, calls: Arc<Mutex<Vec<Ca
             continue;
         }
         let header = message.header();
-        if header.member().map(|m| m.as_str()) != Some("Notify") {
+        if header.member().is_none_or(|m| m.as_str() != "Notify") {
             continue;
         }
         match message.body().deserialize::<Call>() {
@@ -80,6 +80,10 @@ struct Placeholder;
 
 #[zbus::interface(name = "dev.soldunov.TokenStationTest")]
 impl Placeholder {
+    #[expect(
+        clippy::unused_self,
+        reason = "zbus requires an interface method to take &self"
+    )]
     fn ping(&self) {}
 }
 

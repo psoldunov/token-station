@@ -8,7 +8,7 @@ use ts_core::{Level, Meter, MeterBar};
 
 use crate::tray::palette::{BarColors, ColorScheme, Rgba, bar_colors};
 
-/// Pixmap sizes published to the StatusNotifierItem host.
+/// Pixmap sizes published to the `StatusNotifierItem` host.
 pub const SIZES: [u32; 5] = [16, 22, 24, 32, 48];
 
 /// Samples per axis; 4 × 4 per pixel is enough to hide the stair-steps at 16 px.
@@ -38,8 +38,9 @@ impl BarSpec {
 
 /// The bars to draw for a meter: always at least two slots, so the icon keeps
 /// its shape while the daemon is still loading.
+#[must_use]
 pub fn bar_specs(meter: Option<&Meter>) -> Vec<BarSpec> {
-    let bars: &[MeterBar] = meter.map(|m| m.bars.as_slice()).unwrap_or(&[]);
+    let bars: &[MeterBar] = meter.map_or(&[], |m| m.bars.as_slice());
     if bars.is_empty() {
         return vec![
             BarSpec {
@@ -102,7 +103,7 @@ fn geometry(size: u32, slots: usize) -> Geometry {
     let size = f64::from(size);
     let margin = size / 8.0;
     let gap = (size / 8.0).max(1.0);
-    let slots = slots.max(1) as f64;
+    let slots = f64::from(u32::try_from(slots.max(1)).unwrap_or(u32::MAX));
     let inner = size - 2.0 * margin;
     let bar_width = ((inner - gap * (slots - 1.0)) / slots).max(1.0);
     Geometry {
@@ -116,7 +117,8 @@ fn geometry(size: u32, slots: usize) -> Geometry {
 
 impl Geometry {
     fn bar(self, index: usize) -> Rect {
-        let x0 = self.margin + index as f64 * (self.bar_width + self.gap);
+        let index = f64::from(u32::try_from(index).unwrap_or(u32::MAX));
+        let x0 = self.margin + index * (self.bar_width + self.gap);
         Rect {
             x0,
             y0: self.margin,
@@ -138,6 +140,11 @@ fn sample(geo: Geometry, bar: Rect, spec: BarSpec, x: f64, y: f64) -> (bool, boo
 }
 
 /// Blend disjoint ring and fill coverage into one straight-alpha pixel.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "every channel is rounded and clamped to 0.0..=255.0 before the cast"
+)]
 fn blend(colors: BarColors, ring: f64, fill: f64) -> Rgba {
     let weight = |color: Rgba, coverage: f64| f64::from(color.a) / 255.0 * coverage;
     let (wr, wf) = (weight(colors.track, ring), weight(colors.fill, fill));
@@ -164,6 +171,7 @@ fn blend(colors: BarColors, ring: f64, fill: f64) -> Rgba {
 }
 
 /// Render the meter at one size.
+#[must_use]
 pub fn render(size: u32, specs: &[BarSpec], scheme: ColorScheme) -> Pixmap {
     let geo = geometry(size, specs.len());
     let step = 1.0 / f64::from(SUBSAMPLES);
@@ -200,6 +208,7 @@ pub fn render(size: u32, specs: &[BarSpec], scheme: ColorScheme) -> Pixmap {
 }
 
 /// Render every size the host may ask for.
+#[must_use]
 pub fn render_all(specs: &[BarSpec], scheme: ColorScheme) -> Vec<Pixmap> {
     SIZES
         .iter()
@@ -210,8 +219,8 @@ pub fn render_all(specs: &[BarSpec], scheme: ColorScheme) -> Vec<Pixmap> {
 impl From<&Pixmap> for ksni::Icon {
     fn from(pixmap: &Pixmap) -> ksni::Icon {
         ksni::Icon {
-            width: pixmap.size as i32,
-            height: pixmap.size as i32,
+            width: i32::try_from(pixmap.size).unwrap_or(i32::MAX),
+            height: i32::try_from(pixmap.size).unwrap_or(i32::MAX),
             data: pixmap.argb.clone(),
         }
     }
@@ -258,8 +267,8 @@ mod tests {
             assert_eq!(icon.size, size);
             assert_eq!(icon.argb.len(), (size * size * 4) as usize);
             let converted = ksni::Icon::from(icon);
-            assert_eq!(converted.width, size as i32);
-            assert_eq!(converted.height, size as i32);
+            assert_eq!(converted.width, i32::try_from(size).unwrap());
+            assert_eq!(converted.height, i32::try_from(size).unwrap());
         }
     }
 
@@ -279,12 +288,17 @@ mod tests {
         assert_eq!(pixel(&map, 0, 0).a, 0);
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a pixel coordinate computed from the icon geometry is small and positive"
+    )]
     #[test]
     fn an_empty_bar_keeps_its_outline_but_no_fill() {
         let bars = specs(&[(None, Level::Normal), (None, Level::Normal)]);
         let map = render(32, &bars, ColorScheme::Light);
         let geo = geometry(32, 2);
-        let mid_x = (geo.bar(0).x0 + geo.bar(0).x1) / 2.0;
+        let mid_x = f64::midpoint(geo.bar(0).x0, geo.bar(0).x1);
         // The middle of the bar is empty …
         assert_eq!(pixel(&map, mid_x as u32, 16).a, 0);
         // … but the side walls are drawn.
@@ -350,6 +364,10 @@ mod tests {
         assert_eq!(specs[0].level, Level::Warning);
     }
 
+    #[expect(
+        clippy::float_cmp,
+        reason = "compares exact literals that never went through arithmetic"
+    )]
     #[test]
     fn out_of_range_percentages_are_clamped() {
         assert_eq!(

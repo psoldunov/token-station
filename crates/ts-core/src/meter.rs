@@ -6,6 +6,7 @@ use crate::snapshot::{
 };
 
 /// Pick the window a provider's bar represents.
+#[must_use]
 pub fn meter_window(provider: &ProviderSnapshot, choice: MeterWindow) -> Option<&UsageWindow> {
     let by_kind = |kind: WindowKind| {
         provider
@@ -24,6 +25,7 @@ pub fn meter_window(provider: &ProviderSnapshot, choice: MeterWindow) -> Option<
 }
 
 /// Bar for one provider. Providers without usable data get an empty bar.
+#[must_use]
 pub fn meter_bar(
     provider: &ProviderSnapshot,
     choice: MeterWindow,
@@ -46,6 +48,7 @@ pub fn meter_bar(
 }
 
 /// Meter over all enabled providers (disabled ones are omitted).
+#[must_use]
 pub fn compute_meter(
     providers: &[ProviderSnapshot],
     choice: MeterWindow,

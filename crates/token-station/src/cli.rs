@@ -16,7 +16,7 @@ pub const FAILURE_EXIT: u8 = 1;
 #[derive(Debug, Parser)]
 #[command(name = "token-station", version, about)]
 pub struct Cli {
-    /// With no subcommand: run `setup` inside an AppImage, print help otherwise.
+    /// With no subcommand: run `setup` inside an `AppImage`, print help otherwise.
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -46,7 +46,7 @@ pub enum Command {
         #[arg(long, value_name = "CMD")]
         wrap: Option<String>,
     },
-    /// Standalone StatusNotifierItem tray icon.
+    /// Standalone `StatusNotifierItem` tray icon.
     Tray,
     /// Install the user services and desktop integration.
     Setup(SetupArgs),
@@ -97,6 +97,7 @@ impl From<DesktopArg> for DesktopChoice {
 
 impl SetupArgs {
     /// The options the installer works from.
+    #[must_use]
     pub fn options(&self) -> crate::integration::SetupOptions {
         crate::integration::SetupOptions {
             desktop: self.desktop.into(),

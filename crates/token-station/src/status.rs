@@ -19,6 +19,11 @@ use crate::paths::Paths;
 use crate::pricing_refresh;
 
 /// Human-readable status: one line per window, then the local token totals.
+#[must_use]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a rounded percentage is far inside i64; `as` saturates anything out of range"
+)]
 pub fn render(snapshot: &Snapshot, now: i64) -> String {
     let mut lines = Vec::new();
     for provider in &snapshot.providers {
@@ -55,6 +60,7 @@ pub fn render(snapshot: &Snapshot, now: i64) -> String {
 }
 
 /// Human wording for a non-ok provider state, with its message appended.
+#[must_use]
 pub fn state_text(state: ProviderState, message: Option<&str>) -> String {
     let label = match state {
         ProviderState::Loading => "loading",
@@ -72,6 +78,7 @@ pub fn state_text(state: ProviderState, message: Option<&str>) -> String {
 }
 
 /// ` · resets in 2h 14m`, or the empty string when the window never resets.
+#[must_use]
 pub fn reset_suffix(resets_at: Option<i64>, now: i64) -> String {
     match resets_at.map(|t| t - now) {
         Some(remaining) if remaining > 0 => {
@@ -82,6 +89,7 @@ pub fn reset_suffix(resets_at: Option<i64>, now: i64) -> String {
 }
 
 /// `317.2M tokens · $228.17`.
+#[must_use]
 pub fn totals_text(totals: &TokenTotals) -> String {
     let tokens = format_count(totals.total);
     match totals.cost_usd {
@@ -91,6 +99,11 @@ pub fn totals_text(totals: &TokenTotals) -> String {
 }
 
 /// `1.2M`, `34.5k`, `812`.
+#[must_use]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "token totals stay far below 2^53, and the result is rounded to one decimal for display"
+)]
 pub fn format_count(value: u64) -> String {
     match value {
         0..=9_999 => value.to_string(),
@@ -100,6 +113,12 @@ pub fn format_count(value: u64) -> String {
 }
 
 /// Snapshot from the daemon, or one produced locally when it is not running.
+///
+/// # Errors
+///
+/// Returns an error when a running daemon is found but its proxy cannot be
+/// built, its `Snapshot` call fails, or the JSON it sends back is unreadable.
+/// No daemon at all is not an error: the providers are read in process.
 pub async fn current_snapshot(paths: &Paths) -> anyhow::Result<Snapshot> {
     if let Ok(connection) = zbus::Connection::session().await {
         if client::daemon_is_running(&connection).await {
@@ -128,6 +147,11 @@ async fn run_providers_once(paths: &Paths) -> Snapshot {
 }
 
 /// `token-station status`.
+///
+/// # Errors
+///
+/// Returns whatever [`current_snapshot`] returns, plus a serialization error
+/// when `--json` was asked for and the snapshot cannot be rendered as JSON.
 pub async fn status(paths: &Paths, as_json: bool) -> anyhow::Result<()> {
     let snapshot = current_snapshot(paths).await?;
     let out = if as_json {
@@ -140,6 +164,11 @@ pub async fn status(paths: &Paths, as_json: bool) -> anyhow::Result<()> {
 }
 
 /// `token-station refresh`.
+///
+/// # Errors
+///
+/// Returns an error when the session bus is unreachable, when no daemon owns the
+/// well-known name, or when the `Refresh` call itself fails.
 pub async fn refresh() -> anyhow::Result<()> {
     let connection = zbus::Connection::session()
         .await
@@ -153,6 +182,7 @@ pub async fn refresh() -> anyhow::Result<()> {
 }
 
 /// Defaults used when no config file exists, exposed for tests.
+#[must_use]
 pub fn default_config() -> Config {
     Config::default()
 }
@@ -176,8 +206,8 @@ mod tests {
         }
     }
 
-    fn snapshot(providers: Vec<ProviderSnapshot>) -> Snapshot {
-        assemble(1, 0, &providers, &Config::default())
+    fn snapshot(providers: &[ProviderSnapshot]) -> Snapshot {
+        assemble(1, 0, providers, &Config::default())
     }
 
     #[test]
@@ -187,7 +217,7 @@ mod tests {
             window("Session", 34.0, Some(8_040)),
             window("Weekly", 15.0, None),
         ];
-        let text = render(&snapshot(vec![claude]), 0);
+        let text = render(&snapshot(&[claude]), 0);
         assert_eq!(
             text,
             "Claude Code · Session 34% · resets in 2h 14m\nClaude Code · Weekly 15%"
@@ -211,7 +241,7 @@ mod tests {
             by_model: vec![],
             updated_at: 0,
         });
-        let text = render(&snapshot(vec![claude]), 0);
+        let text = render(&snapshot(&[claude]), 0);
         assert!(text.ends_with("Claude Code · today 1.2M tokens · $0.42 · 7 days 812 tokens"));
     }
 
@@ -219,16 +249,16 @@ mod tests {
     fn non_ok_providers_show_their_state_and_message() {
         let mut codex = ProviderSnapshot::empty(ProviderId::Codex, ProviderState::NotInstalled);
         codex.message = Some("codex is not on PATH".into());
-        let text = render(&snapshot(vec![codex]), 0);
+        let text = render(&snapshot(&[codex]), 0);
         assert_eq!(text, "Codex · not installed — codex is not on PATH");
 
         let bare = ProviderSnapshot::empty(ProviderId::Codex, ProviderState::Unauthenticated);
-        assert_eq!(render(&snapshot(vec![bare]), 0), "Codex · not signed in");
+        assert_eq!(render(&snapshot(&[bare]), 0), "Codex · not signed in");
     }
 
     #[test]
     fn an_empty_snapshot_says_so() {
-        assert_eq!(render(&snapshot(vec![]), 0), "No usage data yet");
+        assert_eq!(render(&snapshot(&[]), 0), "No usage data yet");
     }
 
     #[test]

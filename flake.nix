@@ -92,6 +92,25 @@
           );
           test = craneLib.cargoTest args;
           fmt = craneLib.cargoFmt { inherit (daemon.commonArgs) src; };
+          # Licences, bans and sources per deny.toml. Advisories need the
+          # network, so CI runs them as a separate job.
+          deny = craneLib.cargoDeny {
+            inherit (daemon.commonArgs) pname version strictDeps;
+            src = pkgs.lib.fileset.toSource {
+              root = ./.;
+              fileset = pkgs.lib.fileset.unions [
+                ./Cargo.toml
+                ./Cargo.lock
+                ./crates
+                ./deny.toml
+              ];
+            };
+          };
+          # Dependencies declared in a Cargo.toml but never used in the source.
+          machete = pkgs.runCommand "cargo-machete-check" { nativeBuildInputs = [ pkgs.cargo-machete ]; } ''
+            cargo-machete ${daemon.commonArgs.src}
+            touch $out
+          '';
           # The applet as installed: KPackage has to find it by plugin id and
           # hand back a real path. A symlinked package still "shows", but with
           # an empty path, which is exactly how it fails to load in the shell.
@@ -147,7 +166,9 @@
             clippy
             rustfmt
             rust-analyzer
+            cargo-deny
             cargo-llvm-cov
+            cargo-machete
             pkg-config
             sqlite
             dbus

@@ -62,6 +62,7 @@ fn same_period(a: Option<i64>, b: Option<i64>) -> bool {
 /// Decide notifications for `providers` and return the next state.
 ///
 /// Providers whose state is not `ok` are skipped and keep their entries.
+#[must_use]
 pub fn evaluate(
     state: &AlertState,
     providers: &[ProviderSnapshot],

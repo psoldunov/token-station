@@ -39,6 +39,11 @@ pub async fn daemon_is_running(connection: &zbus::Connection) -> bool {
 }
 
 /// A proxy for the daemon at its well-known address.
+///
+/// # Errors
+///
+/// Returns a [`zbus::Error`] when the destination, path or interface name is
+/// rejected, or when the proxy cannot be built on `connection`.
 pub async fn connect(connection: &zbus::Connection) -> zbus::Result<TokenStationProxy<'static>> {
     TokenStationProxy::builder(connection)
         .destination(BUS_NAME)?

@@ -42,6 +42,7 @@ pub struct DesktopNotifier {
 }
 
 impl DesktopNotifier {
+    #[must_use]
     pub fn new(connection: zbus::Connection) -> DesktopNotifier {
         DesktopNotifier { connection }
     }
@@ -102,6 +103,11 @@ impl Notifier for SilentNotifier {
 }
 
 /// Summary, body and urgency for one alert, as seen by the user.
+#[must_use]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a rounded percentage is far inside i64; `as` saturates anything out of range"
+)]
 pub fn alert_text(alert: &Alert, now: i64) -> (String, String, Level) {
     let who = alert.provider.display_name();
     let percent = alert.percent.round() as i64;
@@ -134,11 +140,13 @@ fn reset_body(resets_at: Option<i64>, now: i64) -> String {
 }
 
 /// Spelled-out duration for notification bodies: `2 h 14 min`.
+#[must_use]
 pub fn long_duration(seconds: i64) -> String {
     format_duration(seconds, " ", "d", "h", "min")
 }
 
 /// Tight duration for one-line CLI output: `2h 14m`.
+#[must_use]
 pub fn compact_duration(seconds: i64) -> String {
     format_duration(seconds, "", "d", "h", "m")
 }
@@ -154,7 +162,7 @@ fn format_duration(seconds: i64, gap: &str, d: &str, h: &str, m: &str) -> String
     } else if hours > 0 {
         format!("{} {}", unit(hours, h), unit(minutes, m))
     } else {
-        unit(minutes.max(if seconds > 0 { 1 } else { 0 }), m)
+        unit(minutes.max(i64::from(seconds > 0)), m)
     }
 }
 
@@ -191,14 +199,20 @@ pub(crate) mod testing {
     #[async_trait]
     impl Notifier for RecordingNotifier {
         async fn notify(&self, summary: &str, body: &str, level: Level) {
-            let mut sent = self.sent.lock().unwrap_or_else(|e| e.into_inner());
+            let mut sent = self
+                .sent
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             sent.push((summary.into(), body.into(), level));
         }
     }
 
     impl RecordingNotifier {
         pub fn summaries(&self) -> Vec<String> {
-            let sent = self.sent.lock().unwrap_or_else(|e| e.into_inner());
+            let sent = self
+                .sent
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             sent.iter().map(|(s, _, _)| s.clone()).collect()
         }
     }

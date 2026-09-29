@@ -158,8 +158,7 @@ impl CodexProvider {
     fn now_unix() -> i64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0)
+            .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
     }
 }
 
@@ -303,10 +302,9 @@ impl Provider for CodexProvider {
             let ready = self
                 .scheduling
                 .read()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .backoff_resume_at
-                .map(|t| now >= t)
-                .unwrap_or(true);
+                .map_or(true, |t| now >= t);
             if !ready {
                 return RefreshOutcome::Skipped("backing off after a previous failure".into());
             }
@@ -327,21 +325,20 @@ impl Provider for CodexProvider {
         let attempt = self
             .attempt(&mut inner, binary.as_deref(), &homes, now)
             .await;
-        let resume_at = match &attempt {
-            Ok(_) => {
-                inner.limits_backoff.succeed();
-                None
-            }
-            Err(_) => {
-                inner.limits_backoff.fail(now);
-                Some(now + inner.limits_backoff.remaining(now).as_secs() as i64)
-            }
+        let resume_at = if attempt.is_ok() {
+            inner.limits_backoff.succeed();
+            None
+        } else {
+            inner.limits_backoff.fail(now);
+            let remaining =
+                i64::try_from(inner.limits_backoff.remaining(now).as_secs()).unwrap_or(i64::MAX);
+            Some(now.saturating_add(remaining))
         };
         drop(inner);
         self.schedule_idle_shutdown();
         self.scheduling
             .write()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .backoff_resume_at = resume_at;
 
         match attempt {
@@ -362,7 +359,7 @@ impl Provider for CodexProvider {
                 let mut cached = self
                     .cached
                     .read()
-                    .unwrap_or_else(|e| e.into_inner())
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clone();
                 cached.state = if cached.updated_at.is_some() {
                     ProviderState::Stale
@@ -390,7 +387,10 @@ impl Provider for CodexProvider {
 
         // The ledger first: it is what this call exists for, and it needs no lock
         // anybody else holds for long.
-        let mut ledger = self.ledger.write().unwrap_or_else(|e| e.into_inner());
+        let mut ledger = self
+            .ledger
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *ledger = std::mem::take(&mut *ledger)
             .with_events(output.events)
             .pruned(now - TOKEN_RETENTION_SECS);
@@ -402,9 +402,18 @@ impl Provider for CodexProvider {
     }
 
     fn snapshot(&self, now: i64) -> ProviderSnapshot {
-        let cached = self.cached.read().unwrap_or_else(|e| e.into_inner());
-        let ledger = self.ledger.read().unwrap_or_else(|e| e.into_inner());
-        let pricing = self.pricing.read().unwrap_or_else(|e| e.into_inner());
+        let cached = self
+            .cached
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let ledger = self
+            .ledger
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let pricing = self
+            .pricing
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tokens = if ledger.is_empty() {
             None
         } else {
@@ -427,17 +436,24 @@ impl Provider for CodexProvider {
     }
 
     fn next_limits_refresh(&self, now: i64, default_interval: Duration) -> Duration {
-        let info = *self.scheduling.read().unwrap_or_else(|e| e.into_inner());
+        let info = *self
+            .scheduling
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut delay = default_interval;
         if let Some(resume_at) = info.backoff_resume_at {
             if resume_at > now {
-                delay = delay.max(Duration::from_secs((resume_at - now) as u64));
+                // Guarded by `resume_at > now`, so the difference is positive.
+                delay = delay.max(Duration::from_secs(
+                    resume_at.saturating_sub(now).unsigned_abs(),
+                ));
             }
         }
         if let Some(reset_at) = info.earliest_reset_at {
             let until = reset_at + 30 - now;
             if until > 0 {
-                delay = delay.min(Duration::from_secs(until as u64));
+                // Guarded by `until > 0`.
+                delay = delay.min(Duration::from_secs(until.unsigned_abs()));
             }
         }
         delay.max(Duration::from_secs(30))
@@ -481,7 +497,7 @@ impl CodexProvider {
         let mut slot = self
             .rollout_limits
             .write()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if slot.as_ref().is_none_or(|(seen, _)| latest.0 >= *seen) {
             *slot = Some(latest);
         }
@@ -491,7 +507,7 @@ impl CodexProvider {
     fn rollout_limits(&self) -> Option<(i64, RateLimitSnapshotDto)> {
         self.rollout_limits
             .read()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
 
@@ -499,9 +515,12 @@ impl CodexProvider {
         let earliest_reset_at = cached.windows.iter().filter_map(|w| w.resets_at).min();
         self.scheduling
             .write()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .earliest_reset_at = earliest_reset_at;
-        *self.cached.write().unwrap_or_else(|e| e.into_inner()) = cached;
+        *self
+            .cached
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = cached;
     }
 
     /// Try the app-server first (if a binary was found), then the HTTP

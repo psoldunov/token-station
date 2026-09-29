@@ -19,7 +19,7 @@ pub fn plan_label(rate_limit_tier: &str, subscription_type: &str) -> String {
     }
 }
 
-/// Turn a snake_case key like `seven_day_oauth_apps` into `"Seven Day Oauth Apps"`.
+/// Turn a `snake_case` key like `seven_day_oauth_apps` into `"Seven Day Oauth Apps"`.
 pub(crate) fn humanize(key: &str) -> String {
     title_case(key)
 }

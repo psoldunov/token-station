@@ -16,6 +16,7 @@ pub const WAYLAND_NOTE: &str =
     "GNOME on Wayland cannot load a new extension into the running session: log out and back in.";
 
 /// Where the extension is installed.
+#[must_use]
 pub fn target(dirs: &Dirs) -> PathBuf {
     dirs.data
         .join("gnome-shell/extensions")
@@ -23,6 +24,11 @@ pub fn target(dirs: &Dirs) -> PathBuf {
 }
 
 /// Copy the extension and, when `enable_tool` exists, enable it.
+///
+/// # Errors
+///
+/// Returns an error when `payload` holds no GNOME extension directory, which
+/// means the caller needs `--payload-dir` or the `AppImage`.
 pub fn steps(payload: &Path, dirs: &Dirs, enable_tool: Option<&Path>) -> anyhow::Result<Vec<Step>> {
     let source = payload.join(PAYLOAD);
     if !source.is_dir() {

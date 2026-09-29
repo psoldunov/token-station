@@ -46,7 +46,7 @@ fn exit_code(error: &anyhow::Error) -> u8 {
     }
 }
 
-/// With no subcommand: set up when launched as an AppImage, else print the help.
+/// With no subcommand: set up when launched as an `AppImage`, else print the help.
 fn default_command() -> anyhow::Result<()> {
     let session = Session::current();
     if session.appimage.is_some() {

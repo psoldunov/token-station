@@ -6,16 +6,17 @@ use std::sync::Arc;
 pub type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 
 /// The system clock.
+#[must_use]
 pub fn system_clock() -> Clock {
     Arc::new(|| {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0)
+            .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
     })
 }
 
 /// A clock frozen at `now`.
+#[must_use]
 pub fn fixed_clock(now: i64) -> Clock {
     Arc::new(move || now)
 }

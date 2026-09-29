@@ -6,6 +6,10 @@ use ts_core::provider::{Ingest, IngestError, Provider};
 use ts_core::snapshot::ProviderState;
 
 #[tokio::test]
+#[expect(
+    clippy::float_cmp,
+    reason = "compares exact literals that never went through arithmetic"
+)]
 async fn ingest_stores_session_and_weekly_and_marks_ok() {
     let fixture = support::Fixture::new();
     let provider = ClaudeProvider::with_env(

@@ -36,17 +36,29 @@ fn title_case(s: &str) -> String {
         .join(" ")
 }
 
+/// `value / divisor` rounded to the nearest integer, halves away from zero.
+/// Works from the remainder so no `i64` input can overflow.
+fn round_div(value: i64, divisor: i64) -> i64 {
+    let quotient = value / divisor;
+    let remainder = value % divisor;
+    if remainder.abs() * 2 >= divisor {
+        quotient + remainder.signum()
+    } else {
+        quotient
+    }
+}
+
 /// Base label derived only from the window's duration, e.g. `"Session"`, `"Weekly"`.
 fn base_label(window_minutes: Option<i64>) -> String {
     match window_minutes {
         Some(300) => "Session".to_string(),
         Some(10080) => "Weekly".to_string(),
         Some(mins) if mins < 1440 => {
-            let hours = (mins as f64 / 60.0).round() as i64;
+            let hours = round_div(mins, 60);
             format!("{hours}-hour window")
         }
         Some(mins) => {
-            let days = (mins as f64 / 1440.0).round() as i64;
+            let days = round_div(mins, 1440);
             format!("{days}-day window")
         }
         None => "Window".to_string(),
@@ -232,6 +244,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "compares exact literals that never went through arithmetic"
+    )]
     fn rollover_zeroes_usage_for_windows_whose_reset_has_passed() {
         let rolled = rolled_primary(90.0, 400, 500);
         assert_eq!(rolled.used_percent, 0.0);
@@ -240,6 +256,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "compares exact literals that never went through arithmetic"
+    )]
     fn rollover_leaves_future_resets_untouched() {
         let rolled = rolled_primary(10.0, 9_999, 500);
         assert_eq!(rolled.used_percent, 10.0);
@@ -263,6 +283,22 @@ mod tests {
         assert_eq!(base_label(Some(60)), "1-hour window");
         assert_eq!(base_label(Some(2880)), "2-day window");
         assert_eq!(base_label(None), "Window");
+    }
+
+    #[test]
+    fn base_labels_round_halves_away_from_zero_and_never_overflow() {
+        assert_eq!(base_label(Some(89)), "1-hour window");
+        assert_eq!(base_label(Some(90)), "2-hour window");
+        assert_eq!(base_label(Some(-90)), "-2-hour window");
+        assert_eq!(base_label(Some(2160)), "2-day window");
+        assert_eq!(
+            base_label(Some(i64::MAX)),
+            format!("{}-day window", i64::MAX / 1440 + 1)
+        );
+        assert_eq!(
+            base_label(Some(i64::MIN)),
+            format!("{}-hour window", i64::MIN / 60)
+        );
     }
 
     #[test]
@@ -292,6 +328,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "compares exact literals that never went through arithmetic"
+    )]
     fn maps_primary_only_snapshot_from_fixture() {
         let snapshot = RateLimitSnapshotDto {
             limit_id: Some("codex".into()),

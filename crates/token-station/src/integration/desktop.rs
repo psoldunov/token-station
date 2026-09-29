@@ -2,7 +2,7 @@
 //!
 //! The `.desktop` files and the icons are compiled into the binary rather than
 //! read from the payload: `setup` has to rewrite `Exec=` to the real path of the
-//! running AppImage anyway, and embedding them means `--payload-dir` only ever
+//! running `AppImage` anyway, and embedding them means `--payload-dir` only ever
 //! has to hold the two front-end payloads.
 
 use std::path::{Path, PathBuf};
@@ -51,6 +51,7 @@ pub enum Desktop {
 }
 
 impl Desktop {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Desktop::Kde => "kde",
@@ -75,11 +76,13 @@ pub fn detect(current: Option<&str>) -> Desktop {
 
 /// Quote one `Exec=` argument the way the Desktop Entry spec asks for; see
 /// [`quoting::DESKTOP`] for the two levels of escaping it wants.
+#[must_use]
 pub fn quote_exec(value: &str) -> String {
     quoting::quoted(value, &quoting::DESKTOP)
 }
 
 /// Replace the `Exec=` line with the real binary and `args`.
+#[must_use]
 pub fn rewrite_exec(contents: &str, exec: &Path, args: &str) -> String {
     let replacement = format!("Exec={} {args}", quote_exec(&exec.to_string_lossy()));
     let mut out: Vec<String> = contents
@@ -101,6 +104,7 @@ pub fn rewrite_exec(contents: &str, exec: &Path, args: &str) -> String {
 }
 
 /// The application entry and the icons, for every desktop.
+#[must_use]
 pub fn shared_steps(dirs: &Dirs, exec: &Path) -> Vec<Step> {
     let mut steps = vec![Step::Write {
         target: dirs.data.join("applications").join(ENTRY),
@@ -114,6 +118,7 @@ pub fn shared_steps(dirs: &Dirs, exec: &Path) -> Vec<Step> {
 }
 
 /// XDG autostart entry that starts the tray at login.
+#[must_use]
 pub fn autostart_step(dirs: &Dirs, exec: &Path) -> Step {
     Step::Write {
         target: autostart_path(dirs),
@@ -122,6 +127,7 @@ pub fn autostart_step(dirs: &Dirs, exec: &Path) -> Step {
 }
 
 /// Where the autostart entry lives.
+#[must_use]
 pub fn autostart_path(dirs: &Dirs) -> PathBuf {
     dirs.config.join("autostart").join(TRAY_ENTRY)
 }

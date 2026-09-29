@@ -1,6 +1,6 @@
 //! What is already on disk where `setup` wants to write.
 //!
-//! An AppImage install must never quietly replace a file it does not own. A
+//! An `AppImage` install must never quietly replace a file it does not own. A
 //! home-manager generation puts symlinks into `/nix/store` exactly where the
 //! `.desktop` entry, the unit and the activation file go: renaming over one of
 //! those replaces the link, the manifest then claims it as ours, and `uninstall`
@@ -69,6 +69,7 @@ pub enum Verdict {
 }
 
 /// Decide what to do about `target`.
+#[must_use]
 pub fn verdict(target: &Path, previous: Previous<'_>) -> Verdict {
     let Ok(meta) = std::fs::symlink_metadata(target) else {
         return Verdict::Write;
@@ -108,6 +109,7 @@ fn symlink_verdict(target: &Path, allowed: bool) -> Verdict {
 }
 
 /// The first of `candidates` that exists.
+#[must_use]
 pub fn packaged(candidates: &[PathBuf]) -> Option<PathBuf> {
     candidates
         .iter()
@@ -116,11 +118,13 @@ pub fn packaged(candidates: &[PathBuf]) -> Option<PathBuf> {
 }
 
 /// Where a packaged systemd user unit called `unit` could already be.
+#[must_use]
 pub fn unit_candidates(system: &SystemDirs, home: &Path, unit: &str) -> Vec<PathBuf> {
     candidates(&system.units, home, "systemd/user", unit)
 }
 
 /// Where a packaged D-Bus activation file called `file` could already be.
+#[must_use]
 pub fn service_candidates(system: &SystemDirs, home: &Path, file: &str) -> Vec<PathBuf> {
     candidates(&system.dbus, home, "dbus-1/services", file)
 }

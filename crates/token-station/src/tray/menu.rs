@@ -1,4 +1,4 @@
-//! The words on the tray: tooltip text and the label items of the DBusMenu.
+//! The words on the tray: tooltip text and the label items of the `DBusMenu`.
 //!
 //! Everything here is a pure function of the snapshot, so the wording is tested
 //! against the recorded fixtures without a bus or a tray host.
@@ -44,6 +44,10 @@ fn heading(provider: &ProviderSnapshot) -> String {
 }
 
 /// `Session · 34% · resets in 4h 40m`.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a rounded percentage is far inside i64; `as` saturates anything out of range"
+)]
 fn window_line(window: &UsageWindow, now: i64) -> String {
     format!(
         "{INDENT}{} · {}%{}",
@@ -54,6 +58,7 @@ fn window_line(window: &UsageWindow, now: i64) -> String {
 }
 
 /// Every label item, ready to be turned into disabled `StandardItem`s.
+#[must_use]
 pub fn menu_text(snapshot: Option<&Snapshot>, now: i64) -> MenuText {
     let Some(snapshot) = snapshot else {
         return MenuText {
@@ -85,6 +90,11 @@ pub fn menu_text(snapshot: Option<&Snapshot>, now: i64) -> MenuText {
 }
 
 /// `Claude Code · Session 34% · resets in 2h 14m`, one line per provider.
+#[must_use]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a rounded percentage is far inside i64; `as` saturates anything out of range"
+)]
 pub fn tooltip_description(snapshot: Option<&Snapshot>, now: i64) -> String {
     let Some(snapshot) = snapshot else {
         return DAEMON_OFFLINE.to_string();
@@ -202,7 +212,10 @@ mod tests {
             let snapshot = fixture(case.fixture);
             let text = menu_text(Some(&snapshot), NOW);
             if let Some(expected) = &case.usage_exact {
-                let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
+                let expected: Vec<String> = expected
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect();
                 assert_eq!(text.usage, expected, "{}: usage", case.name);
             }
             if let Some(needle) = case.usage_contains {
@@ -213,7 +226,10 @@ mod tests {
                 );
             }
             if let Some(expected) = &case.tokens_exact {
-                let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
+                let expected: Vec<String> = expected
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect();
                 assert_eq!(text.tokens, expected, "{}: tokens", case.name);
             }
             if case.tokens_empty {

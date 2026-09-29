@@ -1,7 +1,7 @@
 //! Daemon configuration (`$XDG_CONFIG_HOME/token-station/config.toml`).
 //!
 //! The same structure travels as JSON over D-Bus (`GetSettings`/`SetSettings`), with
-//! snake_case keys. Every field has a default, so partial files are fine.
+//! `snake_case` keys. Every field has a default, so partial files are fine.
 
 use std::path::{Path, PathBuf};
 
@@ -155,7 +155,7 @@ pub struct CodexConfig {
     pub homes: Vec<String>,
     pub process_mode: CodexProcessMode,
     pub linger_secs: u64,
-    /// Fall back to the ChatGPT usage endpoint when app-server is unavailable.
+    /// Fall back to the `ChatGPT` usage endpoint when app-server is unavailable.
     pub http_fallback: bool,
 }
 
@@ -194,6 +194,12 @@ pub enum ConfigError {
 
 impl Config {
     /// Load from `path`; a missing file yields defaults.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Read`] when `path` exists but cannot be read,
+    /// [`ConfigError::Toml`] when its contents are not valid TOML, and
+    /// [`ConfigError::Invalid`] when a value is out of bounds.
     pub fn load(path: &Path) -> Result<Config, ConfigError> {
         match std::fs::read_to_string(path) {
             Ok(text) => {
@@ -212,20 +218,36 @@ impl Config {
     }
 
     /// Parse settings JSON as sent over D-Bus; missing keys take defaults.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Json`] when `text` is not valid JSON for this
+    /// schema, and [`ConfigError::Invalid`] when a value is out of bounds.
     pub fn from_json(text: &str) -> Result<Config, ConfigError> {
         let cfg: Config = serde_json::from_str(text)?;
         cfg.validated()
     }
 
+    #[must_use]
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_else(|_| "{}".into())
     }
 
+    /// Serialize to TOML.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Serialize`] when a value cannot be represented in
+    /// TOML, which the bounds checked by [`Config::validated`] rule out.
     pub fn to_toml(&self) -> Result<String, ConfigError> {
         Ok(toml::to_string_pretty(self)?)
     }
 
     /// Validate bounds; returns every problem at once.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Invalid`] listing every out-of-bounds value.
     pub fn validated(self) -> Result<Config, ConfigError> {
         let problems = self.problems();
         if problems.is_empty() {
@@ -292,6 +314,10 @@ mod tests {
         assert_eq!(cfg, Config::default());
     }
 
+    #[expect(
+        clippy::float_cmp,
+        reason = "compares exact literals that never went through arithmetic"
+    )]
     #[test]
     fn partial_toml_fills_defaults() {
         let dir = tempfile::tempdir().unwrap();

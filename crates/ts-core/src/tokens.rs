@@ -25,6 +25,7 @@ pub struct TokenCounts {
 }
 
 impl TokenCounts {
+    #[must_use]
     pub fn total(&self) -> u64 {
         self.input
             .saturating_add(self.output)
@@ -33,12 +34,14 @@ impl TokenCounts {
     }
 
     /// Prompt-side tokens, used to pick the long-context price tier.
+    #[must_use]
     pub fn prompt_tokens(&self) -> u64 {
         self.input
             .saturating_add(self.cache_read)
             .saturating_add(self.cache_write)
     }
 
+    #[must_use]
     pub fn plus(&self, other: &TokenCounts) -> TokenCounts {
         TokenCounts {
             input: self.input.saturating_add(other.input),
@@ -68,14 +71,17 @@ pub struct TokenLedger {
 }
 
 impl TokenLedger {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    #[must_use]
     pub fn len(&self) -> usize {
         self.events.len()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.events.is_empty()
     }
@@ -84,6 +90,7 @@ impl TokenLedger {
     /// event with the larger total token count wins: streamed content-block
     /// lines for the same request can carry partial usage before the final
     /// line reports the full count, and the smaller one must not shadow it.
+    #[must_use]
     pub fn with_events(self, events: impl IntoIterator<Item = TokenEvent>) -> TokenLedger {
         let mut map = self.events;
         for event in events {
@@ -99,6 +106,7 @@ impl TokenLedger {
     }
 
     /// Ledger without events older than `cutoff` (Unix seconds).
+    #[must_use]
     pub fn pruned(self, cutoff: i64) -> TokenLedger {
         TokenLedger {
             events: self

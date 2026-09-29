@@ -23,7 +23,7 @@ pub type Shutdown = watch::Receiver<bool>;
 /// Sleep, unless shutdown arrives first. Returns `false` when it is time to stop.
 async fn sleep_or_stop(delay: Duration, shutdown: &mut Shutdown) -> bool {
     tokio::select! {
-        _ = tokio::time::sleep(delay.min(MAX_SLEEP)) => true,
+        () = tokio::time::sleep(delay.min(MAX_SLEEP)) => true,
         _ = shutdown.changed() => false,
     }
 }

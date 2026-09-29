@@ -22,6 +22,10 @@ fn now() -> i64 {
     system_clock()()
 }
 
+#[expect(
+    clippy::float_cmp,
+    reason = "compares exact literals that never went through arithmetic"
+)]
 #[tokio::test(flavor = "multi_thread")]
 async fn the_fixture_daemon_serves_live_countdowns() {
     let bus = private_bus_or_skip!();

@@ -35,7 +35,7 @@ pub struct ScanOutput {
 struct FileState {
     offset: u64,
     /// The file's name at the time `offset` was recorded; used to build a
-    /// dedup key that survives the sessions/archived_sessions move (the full
+    /// dedup key that survives the `sessions/archived_sessions` move (the full
     /// path does not).
     file_name: String,
     last_seen_total: Option<i64>,
@@ -140,9 +140,8 @@ impl RolloutScanner {
         loop {
             let mut raw_line = Vec::new();
             let n = match reader.read_until(b'\n', &mut raw_line) {
-                Ok(0) => break,
+                Ok(0) | Err(_) => break,
                 Ok(n) => n,
-                Err(_) => break,
             };
             if raw_line.last() != Some(&b'\n') {
                 break; // incomplete trailing line: wait for the next scan
@@ -223,8 +222,7 @@ fn handle_token_count(
         let newer = out
             .latest_rate_limits
             .as_ref()
-            .map(|(ts, _)| timestamp >= *ts)
-            .unwrap_or(true);
+            .is_none_or(|(ts, _)| timestamp >= *ts);
         if newer {
             out.latest_rate_limits = Some((timestamp, rate_limits));
         }
@@ -236,14 +234,11 @@ fn handle_token_count(
     let Some(total) = info
         .get("total_token_usage")
         .and_then(|v| v.get("total_tokens"))
-        .and_then(|v| v.as_i64())
+        .and_then(serde_json::Value::as_i64)
     else {
         return;
     };
-    let increased = state
-        .last_seen_total
-        .map(|prev| total > prev)
-        .unwrap_or(true);
+    let increased = state.last_seen_total.is_none_or(|prev| total > prev);
     state.last_seen_total = Some(total);
     if !increased {
         return;
@@ -251,7 +246,11 @@ fn handle_token_count(
     let Some(last) = info.get("last_token_usage") else {
         return;
     };
-    let get_u64 = |field: &str| last.get(field).and_then(|v| v.as_u64()).unwrap_or(0);
+    let get_u64 = |field: &str| {
+        last.get(field)
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+    };
     let input_tokens = get_u64("input_tokens");
     let cached_input_tokens = get_u64("cached_input_tokens");
     let counts = TokenCounts {
@@ -290,17 +289,20 @@ fn rollout_rate_limits(
         // `resets_in_seconds` is relative to this line's own timestamp, not
         // an absolute epoch value: treating it as absolute would report a
         // reset time that is off by however old the rollout line is.
-        let resets_at = w.get("resets_at").and_then(|v| v.as_i64()).or_else(|| {
-            w.get("resets_in_seconds")
-                .and_then(|v| v.as_i64())
-                .map(|secs| line_timestamp.saturating_add(secs))
-        });
+        let resets_at = w
+            .get("resets_at")
+            .and_then(serde_json::Value::as_i64)
+            .or_else(|| {
+                w.get("resets_in_seconds")
+                    .and_then(serde_json::Value::as_i64)
+                    .map(|secs| line_timestamp.saturating_add(secs))
+            });
         Some(RateLimitWindowDto {
             used_percent: w
                 .get("used_percent")
-                .and_then(|v| v.as_f64())
+                .and_then(serde_json::Value::as_f64)
                 .unwrap_or(0.0),
-            window_duration_mins: w.get("window_minutes").and_then(|v| v.as_i64()),
+            window_duration_mins: w.get("window_minutes").and_then(serde_json::Value::as_i64),
             resets_at,
         })
     };
@@ -330,8 +332,7 @@ fn rollout_rate_limits(
 fn is_recent(path: &Path, min: SystemTime) -> bool {
     std::fs::metadata(path)
         .and_then(|m| m.modified())
-        .map(|mtime| mtime >= min)
-        .unwrap_or(false)
+        .is_ok_and(|mtime| mtime >= min)
 }
 
 /// `<home>/sessions/**/rollout-*.jsonl` and `<home>/archived_sessions/*.jsonl`.
@@ -367,7 +368,7 @@ fn walk_for_rollouts(dir: &Path, depth: u32, out: &mut Vec<PathBuf>) {
 
 fn is_rollout_file(path: &Path) -> bool {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    name.starts_with("rollout-") && name.ends_with(".jsonl")
+    name.starts_with("rollout-") && path.extension().is_some_and(|ext| ext == "jsonl")
 }
 
 #[cfg(test)]
@@ -619,7 +620,7 @@ mod tests {
     }
 
     /// `rollout_rate_limits`'s `primary.resets_at` for one raw `primary` window.
-    fn primary_resets_at(primary: serde_json::Value) -> Option<i64> {
+    fn primary_resets_at(primary: &serde_json::Value) -> Option<i64> {
         let value = serde_json::json!({ "primary": primary });
         rollout_rate_limits(&value, 1_000)
             .and_then(|s| s.primary)
@@ -629,14 +630,14 @@ mod tests {
     #[test]
     fn resets_in_seconds_is_relative_to_the_line_timestamp() {
         let resets_at = primary_resets_at(
-            serde_json::json!({"used_percent": 5.0, "window_minutes": 10080, "resets_in_seconds": 3600}),
+            &serde_json::json!({"used_percent": 5.0, "window_minutes": 10080, "resets_in_seconds": 3600}),
         );
         assert_eq!(resets_at, Some(4_600));
     }
 
     #[test]
     fn resets_at_absolute_value_takes_priority_over_resets_in_seconds() {
-        let resets_at = primary_resets_at(serde_json::json!({
+        let resets_at = primary_resets_at(&serde_json::json!({
             "used_percent": 5.0, "window_minutes": 10080, "resets_at": 999, "resets_in_seconds": 3600
         }));
         assert_eq!(resets_at, Some(999));

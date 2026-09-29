@@ -69,7 +69,9 @@ pub fn decide(state: &mut LimitsState, config: &ClaudeConfig, now: i64, force: b
         let floor = if force {
             HARD_FLOOR_SECS
         } else {
-            (config.min_endpoint_interval_secs as i64).max(HARD_FLOOR_SECS)
+            i64::try_from(config.min_endpoint_interval_secs)
+                .unwrap_or(i64::MAX)
+                .max(HARD_FLOOR_SECS)
         };
         if now - last < floor {
             return Decision::SoftSkip("Refreshed too recently.".to_string());
@@ -87,20 +89,22 @@ pub fn backoff_after_rate_limit(
     min_endpoint_interval_secs: u64,
     now: i64,
 ) -> (i64, u64) {
-    match retry_after_secs {
-        Some(secs) => {
-            let clamped = secs.min(MAX_RETRY_AFTER_SECS as u64) as i64;
-            (now.saturating_add(clamped), prior_current_secs)
-        }
-        None => {
-            let base = min_endpoint_interval_secs.max(BACKOFF_BASE_SECS);
-            let secs = if prior_current_secs == 0 {
-                base
-            } else {
-                (prior_current_secs * 2).min(BACKOFF_CAP_SECS)
-            };
-            (now.saturating_add(secs as i64), secs)
-        }
+    if let Some(secs) = retry_after_secs {
+        let clamped = i64::try_from(secs)
+            .unwrap_or(i64::MAX)
+            .min(MAX_RETRY_AFTER_SECS);
+        (now.saturating_add(clamped), prior_current_secs)
+    } else {
+        let base = min_endpoint_interval_secs.max(BACKOFF_BASE_SECS);
+        let secs = if prior_current_secs == 0 {
+            base
+        } else {
+            (prior_current_secs * 2).min(BACKOFF_CAP_SECS)
+        };
+        (
+            now.saturating_add(i64::try_from(secs).unwrap_or(i64::MAX)),
+            secs,
+        )
     }
 }
 
@@ -112,18 +116,18 @@ pub fn next_limits_refresh(
     default_interval: Duration,
     resets_at: impl Iterator<Item = i64>,
 ) -> Duration {
+    let min_interval = i64::try_from(min_endpoint_interval_secs).unwrap_or(i64::MAX);
     let mandatory = [
-        state.backoff_until.map(|u| (u - now).max(0)).unwrap_or(0),
-        state
-            .last_attempt_at
-            .map(|last| (last + min_endpoint_interval_secs as i64 - now).max(0))
-            .unwrap_or(0),
+        state.backoff_until.map_or(0, |u| (u - now).max(0)),
+        state.last_attempt_at.map_or(0, |last| {
+            last.saturating_add(min_interval).saturating_sub(now).max(0)
+        }),
     ]
     .into_iter()
     .max()
     .unwrap_or(0);
 
-    let default_secs = default_interval.as_secs() as i64;
+    let default_secs = i64::try_from(default_interval.as_secs()).unwrap_or(i64::MAX);
     let earliest_reset = resets_at.filter(|&r| r > now).map(|r| r - now).min();
     let desired = match earliest_reset {
         Some(r) => default_secs.min(r + HARD_FLOOR_SECS),
@@ -131,7 +135,8 @@ pub fn next_limits_refresh(
     };
 
     let secs = mandatory.max(desired).max(HARD_FLOOR_SECS);
-    Duration::from_secs(secs as u64)
+    // `secs` is at least `HARD_FLOOR_SECS`, so this is exact.
+    Duration::from_secs(secs.unsigned_abs())
 }
 
 /// Pick whichever of an endpoint/statusline observation is newer, apply
@@ -194,6 +199,10 @@ pub enum LastOutcome {
 
 /// Everything [`provider_state`] needs, gathered from IO by the caller.
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent observations the caller gathers separately; every combination is reachable, so no enum models them"
+)]
 pub struct StateInputs {
     pub claude_binary_found: bool,
     pub credentials_file_exists: bool,
@@ -430,6 +439,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "compares exact literals that never went through arithmetic"
+    )]
     fn merge_prefers_newer_source_for_session_and_weekly() {
         let endpoint = vec![
             window("session", 10.0, Some(2000), 100, "oauth"),
@@ -445,6 +458,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "compares exact literals that never went through arithmetic"
+    )]
     fn merge_applies_rollover_to_past_resets() {
         let endpoint = vec![window("session", 90.0, Some(400), 100, "oauth")];
         let merged = merge_windows(&endpoint, None, None, 500);

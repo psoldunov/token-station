@@ -29,6 +29,7 @@ pub enum SetSettingsError {
 
 impl SetSettingsError {
     /// Every problem, as a front end would list them.
+    #[must_use]
     pub fn problems(&self) -> Vec<String> {
         match self {
             SetSettingsError::Rejected(problems) => problems.clone(),

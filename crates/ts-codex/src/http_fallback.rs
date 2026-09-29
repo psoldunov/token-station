@@ -1,4 +1,4 @@
-//! HTTP fallback against the ChatGPT usage endpoint, used only when the
+//! HTTP fallback against the `ChatGPT` usage endpoint, used only when the
 //! app-server is unavailable or too old to support it.
 
 use std::time::Duration;
@@ -248,7 +248,7 @@ mod tests {
             .and(header("ChatGPT-Account-Id", "acct-1"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "plan_type": "plus",
-                "rate_limit": {"primary_window": {"used_percent": 5.0, "limit_window_seconds": 604800}}
+                "rate_limit": {"primary_window": {"used_percent": 5.0, "limit_window_seconds": 604_800}}
             })))
             .mount(&server)
             .await;

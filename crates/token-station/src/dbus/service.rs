@@ -115,6 +115,11 @@ fn validate_history_args(provider: &str, window_id: &str) -> Option<(ts_core::Pr
 ///
 /// Serving before requesting the name is what makes `Type=dbus` units and bus
 /// activation safe: the object answers the very first call.
+///
+/// # Errors
+///
+/// Returns a [`zbus::Error`] when the object path is already served on
+/// `connection`.
 pub async fn serve(
     connection: &zbus::Connection,
     publisher: Arc<Publisher>,

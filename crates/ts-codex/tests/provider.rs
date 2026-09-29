@@ -3,6 +3,7 @@
 //! stdin line actually received) and a wiremock HTTP server for the fallback
 //! path.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -46,10 +47,12 @@ fn write_fake_codex(dir: &Path, name: &str, steps: &[Step], spawn_log: &Path) ->
         for _ in 0..*consume {
             script.push_str("IFS= read -r _line || exit 0\n");
         }
-        script.push_str(&format!(
-            "printf '%s\\n' '{}'\n",
+        writeln!(
+            script,
+            "printf '%s\\n' '{}'",
             serde_json::to_string(response).unwrap()
-        ));
+        )
+        .expect("writing to a String never fails");
     }
     // Explicit `<&0` matters: a bare `cat &` gets its stdin silently
     // redirected from /dev/null by a non-interactive shell and exits at
@@ -240,7 +243,7 @@ async fn unsupported_method_falls_back_to_http() {
         .and(wiremock::matchers::path("/backend-api/wham/usage"))
         .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({
             "plan_type": "plus",
-            "rate_limit": {"primary_window": {"used_percent": 3.0, "limit_window_seconds": 604800}}
+            "rate_limit": {"primary_window": {"used_percent": 3.0, "limit_window_seconds": 604_800}}
         })))
         .mount(&server)
         .await;
@@ -411,8 +414,8 @@ async fn next_limits_refresh_backs_off_after_failure_then_recovers() {
     let default_interval = std::time::Duration::from_secs(300);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
+        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+        .unwrap();
     assert_eq!(
         provider.next_limits_refresh(now, default_interval),
         default_interval
@@ -431,6 +434,10 @@ async fn next_limits_refresh_backs_off_after_failure_then_recovers() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::float_cmp,
+    reason = "compares exact literals that never went through arithmetic"
+)]
 async fn rollout_rate_limits_are_used_as_last_resort() {
     let dir = tempfile::tempdir().unwrap();
     let spawn_log = dir.path().join("spawns.log");
@@ -472,7 +479,7 @@ async fn rollout_rate_limits_are_used_as_last_resort() {
 /// signed-in `~/.codex`. Never run in CI; operators run it manually:
 /// `TS_LIVE=1 cargo test -p ts-codex --test provider -- --ignored live_app_server_round_trip`
 #[tokio::test]
-#[ignore]
+#[ignore = "runs the real `codex app-server`; opt in with TS_LIVE=1"]
 async fn live_app_server_round_trip() {
     if std::env::var("TS_LIVE").as_deref() != Ok("1") {
         return;
@@ -489,13 +496,11 @@ async fn live_app_server_round_trip() {
 }
 
 fn process_alive(pid: &str) -> bool {
-    fs::read_to_string(format!("/proc/{pid}/status"))
-        .map(|status| {
-            !status
-                .lines()
-                .any(|l| l.starts_with("State:") && l.contains('Z'))
-        })
-        .unwrap_or(false)
+    fs::read_to_string(format!("/proc/{pid}/status")).is_ok_and(|status| {
+        !status
+            .lines()
+            .any(|l| l.starts_with("State:") && l.contains('Z'))
+    })
 }
 
 #[tokio::test]

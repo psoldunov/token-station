@@ -54,6 +54,7 @@ pub async fn read_scheme(connection: &zbus::Connection) -> Option<ColorScheme> {
 }
 
 /// Is this `SettingChanged` about the colour scheme?
+#[must_use]
 pub fn is_color_scheme(namespace: &str, key: &str) -> bool {
     namespace == APPEARANCE && key == COLOR_SCHEME
 }

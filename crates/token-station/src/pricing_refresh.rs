@@ -51,6 +51,7 @@ pub fn load_cache(path: &Path) -> Option<Pricing> {
 }
 
 /// Bundled table with the cache merged over it.
+#[must_use]
 pub fn bundled_with_cache(path: &Path) -> Pricing {
     match load_cache(path) {
         Some(cached) => Pricing::bundled().merged(&cached),
@@ -68,6 +69,7 @@ pub fn install(shared: &SharedPricing, fresh: &Pricing) {
 }
 
 /// Is a new download due?
+#[must_use]
 pub fn cache_is_stale(path: &Path, now: i64) -> bool {
     match modified_secs(path) {
         Some(modified) => now - modified >= CACHE_MAX_AGE_SECS,
@@ -76,6 +78,14 @@ pub fn cache_is_stale(path: &Path, now: i64) -> bool {
 }
 
 /// Download `url`, refusing anything bigger than [`MAX_PRICING_BYTES`].
+///
+/// # Errors
+///
+/// Returns [`RefreshError::Client`] when the HTTP client cannot be built,
+/// [`RefreshError::Request`] when the request or a body chunk fails or times
+/// out, [`RefreshError::Status`] on a non-success status, and
+/// [`RefreshError::TooLarge`] when the body exceeds [`MAX_PRICING_BYTES`], and
+/// [`RefreshError::Encoding`] when the body is not valid UTF-8.
 pub async fn download(url: &str) -> Result<String, RefreshError> {
     let client = reqwest::Client::builder()
         .timeout(DOWNLOAD_TIMEOUT)
@@ -129,6 +139,13 @@ async fn parse_and_cache(text: String, cache_path: &Path) -> Result<Pricing, Ref
 }
 
 /// Download, validate, cache and install a fresh table.
+///
+/// # Errors
+///
+/// Returns whatever [`download`] returns, plus [`RefreshError::Parse`] when the
+/// body holds no usable prices, [`RefreshError::Cache`] when the cache file
+/// cannot be written and [`RefreshError::NotRun`] when the blocking parse task
+/// is cancelled. The shared table is left untouched on every failure.
 pub async fn fetch_and_install(
     url: &str,
     cache_path: &Path,

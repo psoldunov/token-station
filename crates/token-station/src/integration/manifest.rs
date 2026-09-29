@@ -50,6 +50,7 @@ pub struct Manifest {
 
 impl Manifest {
     /// An empty manifest for `exec` on `desktop`.
+    #[must_use]
     pub fn new(exec: &Path, desktop: &str, installed_at: i64) -> Manifest {
         Manifest {
             version: VERSION,
@@ -65,6 +66,7 @@ impl Manifest {
     }
 
     /// `$XDG_STATE_HOME/token-station/install-manifest.json`.
+    #[must_use]
     pub fn path(env: &Env) -> PathBuf {
         env.state_home().join(crate::paths::APP_DIR).join(FILE_NAME)
     }
@@ -82,6 +84,12 @@ impl Manifest {
     }
 
     /// Write the manifest atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`std::io::ErrorKind::InvalidData`] when the manifest cannot be
+    /// serialized, and the underlying I/O error when the file cannot be written
+    /// or renamed into place.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         let json = serde_json::to_vec_pretty(self)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;

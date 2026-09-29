@@ -76,6 +76,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "compares exact literals that never went through arithmetic"
+    )]
     fn parses_real_fixture() {
         let obs = parse(&fixture(), 1000).unwrap().unwrap();
         let session = obs.session.unwrap();

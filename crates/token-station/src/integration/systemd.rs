@@ -19,16 +19,19 @@ const BINDIR_PLACEHOLDER: &str = "@bindir@/token-station";
 const TEMPLATE: &str = include_str!("../../../../data/systemd/token-station.service.in");
 
 /// Where the unit is installed.
+#[must_use]
 pub fn unit_path(dirs: &Dirs) -> PathBuf {
     dirs.config.join("systemd/user").join(UNIT)
 }
 
 /// Quote one word of a systemd command line; see [`quoting::SYSTEMD`].
+#[must_use]
 pub fn quote_word(value: &str) -> String {
     quoting::quoted(value, &quoting::SYSTEMD)
 }
 
 /// The unit text for `exec`.
+#[must_use]
 pub fn unit_text(exec: &Path) -> String {
     TEMPLATE.replace(BINDIR_PLACEHOLDER, &quote_word(&exec.to_string_lossy()))
 }
@@ -39,6 +42,7 @@ pub fn unit_text(exec: &Path) -> String {
 /// following it: when the unit already belongs to a package or to home-manager
 /// the write is skipped, and `enable --now` would then start — and `uninstall`
 /// would later `disable --now` — a unit that was never ours.
+#[must_use]
 pub fn steps(dirs: &Dirs, exec: &Path, systemctl: Option<&Path>) -> Vec<Step> {
     let then = match systemctl {
         Some(tool) => vec![
@@ -69,6 +73,7 @@ fn run(tool: &Path, args: &[&str]) -> Step {
 ///
 /// The reload comes second: systemd has to be told the file is gone, or the unit
 /// stays in its list as `not-found` until the next login.
+#[must_use]
 pub fn disable_steps(systemctl: Option<&Path>) -> Vec<Step> {
     match systemctl {
         Some(tool) => vec![

@@ -16,11 +16,13 @@ use crate::integration::{Dirs, dbus_activation, desktop, gnome, plasma, systemd}
 pub const CLAUDE_SETTINGS: &str = "settings.json";
 
 /// Directory names `setup` creates and owns outright.
+#[must_use]
 pub fn dir_names() -> Vec<&'static str> {
     vec![plasma::APPLET_ID, gnome::EXTENSION_UUID]
 }
 
 /// File names `setup` writes.
+#[must_use]
 pub fn file_names() -> Vec<&'static str> {
     let mut names = vec![
         desktop::ENTRY,
@@ -38,6 +40,7 @@ fn roots(dirs: &Dirs) -> Vec<PathBuf> {
 }
 
 /// Is `path` a directory `setup` creates, inside a root it writes into?
+#[must_use]
 pub fn removable_dir(path: &Path, dirs: &Dirs) -> bool {
     named_under(path, &roots(dirs), &dir_names())
 }
@@ -47,6 +50,7 @@ pub fn removable_dir(path: &Path, dirs: &Dirs) -> bool {
 /// The backup sits next to Claude Code's `settings.json`, which the user may put
 /// anywhere, so it is allowed by exact match against the record being undone —
 /// and only after [`trusted_claude_record`] has agreed that record is one of ours.
+#[must_use]
 pub fn removable_file(path: &Path, dirs: &Dirs, backup: Option<&Path>) -> bool {
     backup.is_some_and(|known| known == path) || named_under(path, &roots(dirs), &file_names())
 }
@@ -60,6 +64,7 @@ pub fn removable_file(path: &Path, dirs: &Dirs, backup: Option<&Path>) -> bool {
 /// to be the `settings.json` in the Claude config directory this session resolves
 /// to, and the backup has to be exactly the path
 /// [`claude_settings::backup_path`] derives from it.
+#[must_use]
 pub fn trusted_claude_record(record: &ClaudeRecord, settings: &Path) -> bool {
     record.settings == settings
         && record.settings.file_name() == Some(OsStr::new(CLAUDE_SETTINGS))

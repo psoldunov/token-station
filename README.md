@@ -170,11 +170,13 @@ Unknown keys are rejected, so a typo fails loudly instead of being ignored.
 ```sh
 nix develop                                   # Rust, Plasma SDK, gjs, qmllint, llvm-cov
 cargo test --workspace
+cargo clippy --workspace --all-targets        # clippy::pedantic via [workspace.lints]
+cargo deny check && cargo machete             # licences, bans, sources, advisories; unused deps
 cargo run -p token-station -- daemon --fixture data/fixtures/snapshot-near-limit.json
 plasmoidviewer -a frontends/plasma/dev.soldunov.tokenstation
 bash frontends/plasma/tests/render.sh         # offscreen renders of every fixture
 nix build -L .#checks.x86_64-linux.gnome-vm   # boots GNOME, loads the extension, screenshots
-nix flake check                               # clippy, tests, fmt, packages, VM test
+nix flake check                               # clippy, tests, fmt, deny, machete, packages, VM test
 nix build .#appimage                          # static musl AppImage
 ```
 

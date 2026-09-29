@@ -1,5 +1,5 @@
 //! `token-station setup` and `token-station uninstall`: desktop integration for
-//! the portable AppImage.
+//! the portable `AppImage`.
 //!
 //! Setup builds a plan, executes it, and writes down exactly what it created in
 //! `$XDG_STATE_HOME/token-station/install-manifest.json`. Uninstall reads that
@@ -27,7 +27,7 @@ use crate::integration::manifest::{ClaudeRecord, Manifest};
 use crate::integration::step::{Outcome, Step};
 use crate::paths::Env;
 
-/// Payload location inside an unpacked AppImage, relative to `$APPDIR`.
+/// Payload location inside an unpacked `AppImage`, relative to `$APPDIR`.
 pub const APPDIR_PAYLOAD: &str = "usr/share/token-station/integrations";
 
 /// The XDG roots `setup` writes into.
@@ -41,6 +41,7 @@ pub struct Dirs {
 
 impl Dirs {
     /// Resolve every root from the environment.
+    #[must_use]
     pub fn resolve(env: &Env) -> Dirs {
         Dirs {
             home: env.home_dir(),
@@ -57,7 +58,7 @@ pub struct Session {
     pub current_desktop: Option<String>,
     /// Path of the running `.AppImage`, set by the type2 runtime.
     pub appimage: Option<String>,
-    /// Mount point of the running AppImage, set by the type2 runtime.
+    /// Mount point of the running `AppImage`, set by the type2 runtime.
     pub appdir: Option<String>,
     pub path: Option<String>,
     pub claude_config_dir: Option<String>,
@@ -70,6 +71,7 @@ pub struct Session {
 
 impl Session {
     /// Read the variables from the process environment.
+    #[must_use]
     pub fn current() -> Session {
         let var = |key: &str| std::env::var(key).ok().filter(|value| !value.is_empty());
         Session {
@@ -117,6 +119,11 @@ pub struct SetupOptions {
 }
 
 /// The binary the installed files should point at.
+///
+/// # Errors
+///
+/// Returns an error when this is not an `AppImage` and the running binary's own
+/// path cannot be read from the OS.
 pub fn exec_path(session: &Session) -> anyhow::Result<PathBuf> {
     match session.appimage.as_deref() {
         Some(path) => Ok(PathBuf::from(path)),
@@ -125,6 +132,11 @@ pub fn exec_path(session: &Session) -> anyhow::Result<PathBuf> {
 }
 
 /// Where the front-end payloads live.
+///
+/// # Errors
+///
+/// Returns an error when no `--payload-dir` was given and `$APPDIR` is unset, so
+/// there is nowhere to copy the front ends from.
 pub fn payload_dir(options: &SetupOptions, session: &Session) -> anyhow::Result<PathBuf> {
     if let Some(dir) = &options.payload_dir {
         return Ok(dir.clone());
@@ -138,6 +150,7 @@ pub fn payload_dir(options: &SetupOptions, session: &Session) -> anyhow::Result<
 }
 
 /// Find an executable on `PATH`; nothing else is searched.
+#[must_use]
 pub fn on_path(name: &str, path_var: Option<&str>) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -161,6 +174,12 @@ pub struct Plan {
 }
 
 /// Work out everything `setup` would do, without touching anything.
+///
+/// # Errors
+///
+/// Returns an error when the binary's own path cannot be read, when the payload
+/// directory cannot be resolved, or when the resolved desktop's payload
+/// (the Plasma applet or the GNOME extension) is missing from it.
 pub fn plan(options: &SetupOptions, env: &Env, session: &Session) -> anyhow::Result<Plan> {
     let dirs = Dirs::resolve(env);
     let exec = exec_path(session)?;
@@ -233,6 +252,13 @@ fn unless_packaged(
 }
 
 /// Install everything, or print the plan when `--dry-run` was given.
+///
+/// # Errors
+///
+/// Returns an error when the plan cannot be worked out, or when a step fails:
+/// a file or tree that cannot be written, or a command that cannot be run.
+/// Whatever already landed stays recorded in the manifest, so `uninstall` can
+/// still undo a half-finished run.
 pub fn setup(
     options: &SetupOptions,
     env: &Env,
@@ -328,7 +354,7 @@ fn carry_forward(manifest: &mut Manifest, previous: Option<&Manifest>) {
     // A unit an earlier run wrote and enabled is still enabled, even if this run
     // left a packaged copy in charge and wrote none of its own.
     if manifest.systemd_unit.is_none() {
-        manifest.systemd_unit = previous.systemd_unit.clone();
+        manifest.systemd_unit.clone_from(&previous.systemd_unit);
     }
 }
 
@@ -387,6 +413,12 @@ fn setup_summary(
 }
 
 /// Undo exactly what the manifest records.
+///
+/// # Errors
+///
+/// Returns an error when no manifest exists, so there is nothing to undo, or
+/// when a stop step fails. Files that cannot be removed are collected as
+/// warnings rather than failing the run.
 pub fn uninstall(env: &Env, session: &Session) -> anyhow::Result<String> {
     let manifest_path = Manifest::path(env);
     let Some(manifest) = Manifest::load(&manifest_path) else {
@@ -644,6 +676,8 @@ mod tests {
 
     #[test]
     fn path_lookup_only_reads_path_and_only_accepts_executables() {
+        use std::os::unix::fs::PermissionsExt;
+
         let dir = tempfile::tempdir().unwrap();
         let tool = dir.path().join("systemctl");
         std::fs::write(&tool, "#!/bin/sh\n").unwrap();
@@ -654,7 +688,6 @@ mod tests {
             None,
             "not executable yet"
         );
-        use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(on_path("systemctl", Some(&path)), Some(tool));
         assert_eq!(on_path("systemctl", None), None);

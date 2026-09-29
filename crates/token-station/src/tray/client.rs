@@ -72,11 +72,21 @@ pub async fn initial_snapshot(connection: &zbus::Connection) -> Option<Box<Snaps
 }
 
 /// Ask the daemon to refresh now.
+///
+/// # Errors
+///
+/// Returns a [`zbus::Error`] when the daemon proxy cannot be built or the
+/// `Refresh` call fails.
 pub async fn request_refresh(connection: &zbus::Connection) -> zbus::Result<()> {
     connect(connection).await?.refresh().await
 }
 
 /// Ask a running tray to quit. `Ok(false)` when no tray owns the name.
+///
+/// # Errors
+///
+/// Returns a [`zbus::Error`] when the bus daemon cannot be queried for the name
+/// owner, or when the `Quit` call to the running tray fails.
 pub async fn request_quit(connection: &zbus::Connection) -> zbus::Result<bool> {
     let bus = zbus::fdo::DBusProxy::new(connection).await?;
     if !bus.name_has_owner(TRAY_BUS_NAME.try_into()?).await? {
@@ -96,6 +106,12 @@ pub async fn request_quit(connection: &zbus::Connection) -> zbus::Result<bool> {
 /// [`request_quit`] from a synchronous caller: `uninstall` has no runtime.
 ///
 /// `bus_address` names the bus to use; `None` takes the one in the environment.
+///
+/// # Errors
+///
+/// Returns a message when the one-thread runtime cannot be built, when
+/// `bus_address` is not a usable address or that bus cannot be connected to,
+/// plus whatever [`request_quit`] itself reports.
 pub fn request_quit_blocking(bus_address: Option<&str>) -> Result<bool, String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

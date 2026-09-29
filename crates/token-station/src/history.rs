@@ -1,6 +1,6 @@
 //! Recorded usage percentages, for the front-end sparkline.
 //!
-//! One SQLite file in the state directory. Every call blocks, so the daemon drives
+//! One `SQLite` file in the state directory. Every call blocks, so the daemon drives
 //! this store through [`HistoryHandle`], which moves the work onto a blocking thread.
 
 use std::path::{Path, PathBuf};
@@ -52,6 +52,12 @@ pub struct HistoryStore {
 
 impl HistoryStore {
     /// Open (and create) the database at `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HistoryError::Open`] when the parent directory cannot be
+    /// created or `SQLite` cannot open the file, and [`HistoryError::Query`]
+    /// when the pragmas or the schema cannot be applied.
     pub fn open(path: &Path) -> Result<HistoryStore, HistoryError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| HistoryError::Open {
@@ -67,6 +73,11 @@ impl HistoryStore {
     }
 
     /// An in-memory store, for tests and for a state directory that cannot be written.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HistoryError::Query`] when `SQLite` refuses the in-memory
+    /// database, the pragmas or the schema.
     pub fn in_memory() -> Result<HistoryStore, HistoryError> {
         HistoryStore::prepare(Connection::open_in_memory()?)
     }
@@ -89,6 +100,12 @@ impl HistoryStore {
     }
 
     /// Store observations, replacing any sample with the same key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HistoryError::Poisoned`] when another thread panicked holding
+    /// the connection, and [`HistoryError::Query`] when the insert or the commit
+    /// fails. The transaction means a failure stores nothing.
     pub fn record(&self, samples: &[Sample<'_>]) -> Result<(), HistoryError> {
         self.with_conn(|conn| {
             let tx = conn.transaction()?;
@@ -111,6 +128,11 @@ impl HistoryStore {
     }
 
     /// Samples for one window since `since`, oldest first, down-sampled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HistoryError::Poisoned`] when another thread panicked holding
+    /// the connection, and [`HistoryError::Query`] when the select fails.
     pub fn query(
         &self,
         provider: ProviderId,
@@ -133,15 +155,25 @@ impl HistoryStore {
     }
 
     /// Delete samples older than `cutoff`; returns how many rows went away.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HistoryError::Poisoned`] when another thread panicked holding
+    /// the connection, and [`HistoryError::Query`] when the delete fails.
     pub fn prune(&self, cutoff: i64) -> Result<usize, HistoryError> {
         self.with_conn(|conn| conn.execute("DELETE FROM samples WHERE ts < ?1", [cutoff]))
     }
 
     /// Total number of stored samples (diagnostics and tests).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HistoryError::Poisoned`] when another thread panicked holding
+    /// the connection, and [`HistoryError::Query`] when the count fails.
     pub fn count(&self) -> Result<usize, HistoryError> {
         self.with_conn(|conn| {
             conn.query_row("SELECT COUNT(*) FROM samples", [], |r| {
-                r.get::<_, i64>(0).map(|n| n as usize)
+                r.get::<_, i64>(0).map(|n| usize::try_from(n).unwrap_or(0))
             })
         })
     }
@@ -151,6 +183,12 @@ impl HistoryStore {
 ///
 /// Buckets split the series evenly by index, so the first and last observations keep
 /// their weight and the shape of the curve survives.
+#[must_use]
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    reason = "sample timestamps and bucket sizes are far below 2^53; the averaged timestamp is rounded back to whole seconds"
+)]
 pub fn downsample(points: &[(i64, f64)], max: usize) -> Vec<(i64, f64)> {
     if max == 0 {
         return Vec::new();
@@ -176,6 +214,7 @@ pub fn downsample(points: &[(i64, f64)], max: usize) -> Vec<(i64, f64)> {
 }
 
 /// Render a series the way `GetHistory` returns it.
+#[must_use]
 pub fn to_json(points: &[(i64, f64)]) -> String {
     let rows: Vec<serde_json::Value> = points
         .iter()
@@ -215,6 +254,7 @@ impl HistoryHandle {
     }
 
     /// A handle that opens (and creates) `path` the first time it is used.
+    #[must_use]
     pub fn deferred(path: &Path) -> HistoryHandle {
         HistoryHandle {
             store: Arc::new(OnceLock::new()),
@@ -224,7 +264,12 @@ impl HistoryHandle {
 
     /// Open `path` now, falling back to an in-memory store when the file is unusable.
     ///
-    /// Only a broken SQLite build makes this fail.
+    /// Only a broken `SQLite` build makes this fail.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HistoryError::Query`] when even the in-memory fallback cannot
+    /// be opened or given the schema.
     pub fn open_or_memory(path: &Path) -> Result<HistoryHandle, HistoryError> {
         let store = HistoryStore::open(path).or_else(|error| {
             tracing::error!(%error, "history database unavailable, keeping history in memory");
@@ -417,6 +462,10 @@ mod tests {
         assert_eq!(session_rows(&store), vec![(500, 2.0)]);
     }
 
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "sample indices and timestamps in this fixture are tiny"
+    )]
     #[test]
     fn query_downsamples_to_the_cap() {
         let samples: Vec<OwnedSample> = (0..500)
@@ -436,6 +485,10 @@ mod tests {
         assert!(downsample(&[], 120).is_empty());
     }
 
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "sample indices and timestamps in this fixture are tiny"
+    )]
     #[test]
     fn downsample_averages_each_bucket() {
         let points: Vec<(i64, f64)> = (0..10).map(|i| (i, i as f64)).collect();

@@ -57,6 +57,12 @@ pub fn load_config(path: &std::path::Path) -> Config {
 }
 
 /// Run until SIGINT or SIGTERM.
+///
+/// # Errors
+///
+/// Returns an error when the session bus is unreachable, when another daemon
+/// already owns the well-known name, when the fixture file or the live
+/// providers cannot be served, or when the signal handlers cannot be installed.
 pub async fn run(options: DaemonOptions) -> anyhow::Result<()> {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -291,6 +297,10 @@ mod tests {
         load_config(&path)
     }
 
+    #[expect(
+        clippy::float_cmp,
+        reason = "compares exact literals that never went through arithmetic"
+    )]
     #[test]
     fn a_valid_config_is_used_and_an_unusable_one_falls_back() {
         assert_eq!(

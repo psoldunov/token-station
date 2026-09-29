@@ -21,6 +21,7 @@ pub struct ClaudeEnv {
 
 impl ClaudeEnv {
     /// The real process environment (`HOME`, `CLAUDE_CONFIG_DIR`, `PATH`).
+    #[must_use]
     pub fn current() -> ClaudeEnv {
         ClaudeEnv {
             home: SearchEnv::current().home,

@@ -23,6 +23,7 @@ pub struct Env {
 
 impl Env {
     /// Read the relevant variables from the process environment.
+    #[must_use]
     pub fn current() -> Env {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
         Env {
@@ -36,6 +37,7 @@ impl Env {
     }
 
     /// Build from a map, for tests.
+    #[must_use]
     pub fn from_map(vars: &HashMap<&str, &str>) -> Env {
         let var = |k: &str| vars.get(k).map(|v| (*v).to_string());
         Env {
@@ -49,21 +51,25 @@ impl Env {
     }
 
     /// `$HOME`, or `/tmp` when the environment has none.
+    #[must_use]
     pub fn home_dir(&self) -> PathBuf {
         home_of(self)
     }
 
     /// `$XDG_DATA_HOME`, defaulting to `~/.local/share`.
+    #[must_use]
     pub fn data_home(&self) -> PathBuf {
         root(self.data_home.as_ref(), &home_of(self), ".local/share")
     }
 
     /// `$XDG_CONFIG_HOME`, defaulting to `~/.config`.
+    #[must_use]
     pub fn config_home(&self) -> PathBuf {
         root(self.config_home.as_ref(), &home_of(self), ".config")
     }
 
     /// `$XDG_STATE_HOME`, defaulting to `~/.local/state`.
+    #[must_use]
     pub fn state_home(&self) -> PathBuf {
         root(self.state_home.as_ref(), &home_of(self), ".local/state")
     }
@@ -81,8 +87,7 @@ pub struct Paths {
 fn home_of(env: &Env) -> PathBuf {
     env.home
         .as_deref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .map_or_else(|| PathBuf::from("/tmp"), PathBuf::from)
 }
 
 fn root(explicit: Option<&String>, home: &Path, fallback: &str) -> PathBuf {
@@ -94,6 +99,7 @@ fn root(explicit: Option<&String>, home: &Path, fallback: &str) -> PathBuf {
 
 impl Paths {
     /// Resolve every location from `env`.
+    #[must_use]
     pub fn resolve(env: &Env) -> Paths {
         let home = home_of(env);
         let config = root(env.config_home.as_ref(), &home, ".config").join(APP_DIR);
@@ -113,23 +119,28 @@ impl Paths {
     }
 
     /// Paths for the current process environment.
+    #[must_use]
     pub fn current() -> Paths {
         Paths::resolve(&Env::current())
     }
 
+    #[must_use]
     pub fn history_db(&self) -> PathBuf {
         self.state_dir.join("history.sqlite")
     }
 
+    #[must_use]
     pub fn alerts_file(&self) -> PathBuf {
         self.state_dir.join("alerts.json")
     }
 
+    #[must_use]
     pub fn pricing_cache(&self) -> PathBuf {
         self.cache_dir.join("pricing.json")
     }
 
     /// Drop box used by `token-station statusline` when the daemon is not reachable.
+    #[must_use]
     pub fn statusline_drop(&self) -> PathBuf {
         self.runtime_dir.join("claude-statusline.json")
     }

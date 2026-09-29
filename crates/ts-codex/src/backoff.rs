@@ -25,7 +25,8 @@ impl Backoff {
     /// Record a failure at `now`; the next call is not allowed until the
     /// backoff elapses, and the delay doubles for next time (capped at `max`).
     pub fn fail(&mut self, now: i64) {
-        self.resume_at = Some(now + self.current.as_secs() as i64);
+        let current = i64::try_from(self.current.as_secs()).unwrap_or(i64::MAX);
+        self.resume_at = Some(now.saturating_add(current));
         self.current = (self.current * 2).min(self.max);
     }
 
@@ -37,13 +38,14 @@ impl Backoff {
 
     /// Whether a new attempt is allowed at `now`.
     pub fn ready(&self, now: i64) -> bool {
-        self.resume_at.map(|t| now >= t).unwrap_or(true)
+        self.resume_at.is_none_or(|t| now >= t)
     }
 
     /// Seconds until the next attempt is allowed (0 if already ready).
     pub fn remaining(&self, now: i64) -> Duration {
         match self.resume_at {
-            Some(t) if t > now => Duration::from_secs((t - now) as u64),
+            // Guarded by `t > now`, so the difference is positive and exact.
+            Some(t) if t > now => Duration::from_secs(t.saturating_sub(now).unsigned_abs()),
             _ => Duration::ZERO,
         }
     }

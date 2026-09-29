@@ -365,7 +365,7 @@ fn parse_retry_after_secs(value: &str, now: i64) -> Option<u64> {
     let fmt = "%a, %d %b %Y %H:%M:%S GMT";
     chrono::NaiveDateTime::parse_from_str(trimmed, fmt)
         .ok()
-        .map(|naive| (naive.and_utc().timestamp() - now).max(0) as u64)
+        .map(|naive| u64::try_from(naive.and_utc().timestamp() - now).unwrap_or(0))
 }
 
 #[cfg(test)]
@@ -380,6 +380,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "compares exact literals that never went through arithmetic"
+    )]
     fn parses_real_fixture_via_limits() {
         let text = fixture("oauth_usage_max_2026-09.json");
         let parsed = parse_usage(&text, 1_790_596_800).unwrap();
@@ -432,7 +436,7 @@ mod tests {
     }
 
     /// Parse a `limits` array with exactly one entry and return its window.
-    fn single_limit_window(limit: serde_json::Value) -> UsageWindow {
+    fn single_limit_window(limit: &serde_json::Value) -> UsageWindow {
         let text = serde_json::json!({ "limits": [limit] }).to_string();
         let parsed = parse_usage(&text, 0).unwrap();
         parsed.windows.into_iter().next().unwrap()
@@ -440,7 +444,7 @@ mod tests {
 
     #[test]
     fn weekly_scoped_without_display_name_is_graceful() {
-        let window = single_limit_window(serde_json::json!(
+        let window = single_limit_window(&serde_json::json!(
             {"kind": "weekly_scoped", "percent": 1.0, "resets_at": null, "scope": null}
         ));
         assert_eq!(window.id, "weekly_scoped");
@@ -450,7 +454,7 @@ mod tests {
     #[test]
     fn unknown_limit_kind_is_humanized_other() {
         let window = single_limit_window(
-            serde_json::json!({"kind": "cowork_extra", "percent": 3.0, "resets_at": null}),
+            &serde_json::json!({"kind": "cowork_extra", "percent": 3.0, "resets_at": null}),
         );
         assert_eq!(window.id, "cowork_extra");
         assert_eq!(window.label, "Cowork Extra");

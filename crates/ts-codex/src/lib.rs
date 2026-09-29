@@ -1,5 +1,5 @@
 //! Codex usage provider: talks to `codex app-server` over stdio, falls back to
-//! the ChatGPT usage HTTP endpoint, and scans local rollout logs for token
+//! the `ChatGPT` usage HTTP endpoint, and scans local rollout logs for token
 //! counts.
 
 mod account_tokens;

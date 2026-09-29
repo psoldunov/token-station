@@ -70,7 +70,7 @@ impl Home {
         }
     }
 
-    /// The `integrations` payload an AppImage would carry.
+    /// The `integrations` payload an `AppImage` would carry.
     fn payload(&self) -> PathBuf {
         let payload = self.dir.path().join("integrations");
         for (front_end, file) in [("plasma", "metadata.json"), ("gnome", "metadata.json")] {

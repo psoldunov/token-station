@@ -18,11 +18,13 @@ pub struct Rgba {
 }
 
 impl Rgba {
+    #[must_use]
     pub const fn rgb(r: u8, g: u8, b: u8) -> Rgba {
         Rgba { r, g, b, a: 255 }
     }
 
     /// The same colour at `alpha` (0–255).
+    #[must_use]
     pub const fn with_alpha(self, alpha: u8) -> Rgba {
         Rgba { a: alpha, ..self }
     }
@@ -52,6 +54,7 @@ pub enum ColorScheme {
 
 impl ColorScheme {
     /// The portal reports `1` for "prefer dark"; every other value means light.
+    #[must_use]
     pub fn from_portal(value: u32) -> ColorScheme {
         match value {
             1 => ColorScheme::Dark,
@@ -60,6 +63,7 @@ impl ColorScheme {
     }
 
     /// Colour of a filled bar at `Level::Normal`, and of every bar outline.
+    #[must_use]
     pub fn foreground(self) -> Rgba {
         match self {
             ColorScheme::Dark => LIGHT_FOREGROUND,
@@ -78,6 +82,7 @@ pub struct BarColors {
 }
 
 /// Outline plus fill for one bar at `level`.
+#[must_use]
 pub fn bar_colors(scheme: ColorScheme, level: Level) -> BarColors {
     let foreground = scheme.foreground();
     let fill = match level {

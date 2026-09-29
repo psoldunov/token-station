@@ -8,6 +8,11 @@ const MILLIS_THRESHOLD: i64 = 100_000_000_000;
 
 /// Parse an RFC 3339 / ISO 8601 string, epoch seconds or epoch milliseconds into
 /// Unix seconds.
+#[must_use]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a fractional epoch is truncated to whole seconds on purpose; `as` saturates out-of-range values"
+)]
 pub fn parse_timestamp(value: &Value) -> Option<i64> {
     match value {
         Value::Number(n) => {

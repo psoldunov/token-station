@@ -101,7 +101,10 @@ impl AppServerClient {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         {
-            let mut state = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = self
+                .pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if state.closed {
                 return Err(RpcCallError::Closed);
             }
@@ -111,7 +114,7 @@ impl AppServerClient {
         if self.outgoing.send(line).is_err() {
             self.pending
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .map
                 .remove(&id);
             return Err(RpcCallError::Closed);
@@ -123,7 +126,7 @@ impl AppServerClient {
             Err(_) => {
                 self.pending
                     .lock()
-                    .unwrap_or_else(|e| e.into_inner())
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .map
                     .remove(&id);
                 Err(RpcCallError::Timeout)
@@ -167,7 +170,9 @@ async fn read_loop<R: AsyncRead + Unpin>(
     // Connection closed: dropping each sender (rather than sending through
     // it) makes every waiting `call()` see a `RecvError`, which maps to
     // `RpcCallError::Closed` instead of a synthetic remote error.
-    let mut state = pending.lock().unwrap_or_else(|e| e.into_inner());
+    let mut state = pending
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     state.closed = true;
     state.map.clear();
 }
@@ -190,7 +195,7 @@ fn dispatch_line(line: &str, reply_tx: &mpsc::UnboundedSender<String>, pending: 
 fn reply(pending: &Pending, id: i64, outcome: Result<Value, RpcError>) {
     if let Some(sender) = pending
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .map
         .remove(&id)
     {
@@ -202,14 +207,12 @@ fn reply(pending: &Pending, id: i64, outcome: Result<Value, RpcError>) {
 mod tests {
     use super::*;
     use serde_json::json;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    fn client_over_duplex(
-        server_script: Vec<String>,
-    ) -> (AppServerClient, tokio::io::DuplexStream) {
+    fn client_over_duplex() -> (AppServerClient, tokio::io::DuplexStream) {
         let (client_io, server_io) = tokio::io::duplex(64 * 1024);
         let (client_read, client_write) = tokio::io::split(client_io);
         let client = AppServerClient::connect(client_read, client_write);
-        let _ = server_script;
         (client, server_io)
     }
 
@@ -254,7 +257,7 @@ mod tests {
         ];
 
         for case in cases {
-            let (client, server) = client_over_duplex(vec![]);
+            let (client, server) = client_over_duplex();
             tokio::spawn(respond_after_request(server, case.response_lines));
             let result = client
                 .call(case.method, json!({}), Duration::from_secs(2))
@@ -265,8 +268,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_server_initiated_request_with_method_not_found() {
-        let (_client, mut server) = client_over_duplex(vec![]);
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (_client, mut server) = client_over_duplex();
         server
             .write_all(b"{\"id\":42,\"method\":\"weird/request\",\"params\":{}}\n")
             .await
@@ -281,7 +283,7 @@ mod tests {
 
     #[tokio::test]
     async fn call_times_out_when_no_response_arrives() {
-        let (client, _server) = client_over_duplex(vec![]);
+        let (client, _server) = client_over_duplex();
         let err = client
             .call("slow", json!({}), Duration::from_millis(20))
             .await
@@ -291,7 +293,7 @@ mod tests {
 
     #[tokio::test]
     async fn call_fails_when_connection_closes() {
-        let (client, server) = client_over_duplex(vec![]);
+        let (client, server) = client_over_duplex();
         drop(server);
         let err = client
             .call("anything", json!({}), Duration::from_secs(2))
@@ -302,9 +304,8 @@ mod tests {
 
     #[tokio::test]
     async fn notify_sends_no_id() {
-        let (client, mut server) = client_over_duplex(vec![]);
+        let (client, mut server) = client_over_duplex();
         client.notify("initialized", Value::Null);
-        use tokio::io::AsyncReadExt;
         let mut buf = [0u8; 4096];
         let n = server.read(&mut buf).await.unwrap();
         let line = String::from_utf8_lossy(&buf[..n]);

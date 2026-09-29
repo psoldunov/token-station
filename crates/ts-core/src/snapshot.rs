@@ -27,6 +27,7 @@ impl ProviderId {
     /// All providers, in display order (also the order of the tray meter bars).
     pub const ALL: [ProviderId; 2] = [ProviderId::Claude, ProviderId::Codex];
 
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             ProviderId::Claude => "claude",
@@ -34,6 +35,7 @@ impl ProviderId {
         }
     }
 
+    #[must_use]
     pub fn display_name(self) -> &'static str {
         match self {
             ProviderId::Claude => "Claude Code",
@@ -85,6 +87,7 @@ pub enum Level {
 
 impl Level {
     /// Classify a 0–100 percentage against the warning and critical thresholds.
+    #[must_use]
     pub fn from_percent(percent: f64, warning: f64, critical: f64) -> Level {
         if percent >= critical {
             Level::Critical
@@ -255,6 +258,7 @@ pub struct ProviderSnapshot {
 
 impl ProviderSnapshot {
     /// An empty snapshot in the given state.
+    #[must_use]
     pub fn empty(id: ProviderId, state: ProviderState) -> Self {
         ProviderSnapshot {
             id,
@@ -272,6 +276,7 @@ impl ProviderSnapshot {
     }
 
     /// The window with the highest usage, if any.
+    #[must_use]
     pub fn most_constrained(&self) -> Option<&UsageWindow> {
         self.windows
             .iter()
@@ -315,6 +320,7 @@ impl Snapshot {
     /// Copy with every absolute timestamp moved by `delta` seconds.
     ///
     /// Fixture mode uses this so countdowns stay meaningful whenever a fixture is served.
+    #[must_use]
     pub fn shifted(&self, delta: i64) -> Snapshot {
         let shift = |t: Option<i64>| t.map(|v| v + delta);
         let providers = self
@@ -350,6 +356,7 @@ impl Snapshot {
     }
 
     /// JSON Schema of the snapshot contract.
+    #[must_use]
     pub fn json_schema() -> schemars::Schema {
         schemars::schema_for!(Snapshot)
     }

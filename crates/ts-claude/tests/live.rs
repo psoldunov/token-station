@@ -7,7 +7,7 @@ use ts_core::pricing::shared_bundled;
 use ts_core::provider::{Provider, RefreshOutcome};
 
 #[tokio::test]
-#[ignore]
+#[ignore = "hits the real api.anthropic.com endpoint; opt in with TS_LIVE=1"]
 async fn live_oauth_usage_call() {
     if std::env::var("TS_LIVE").as_deref() != Ok("1") {
         eprintln!("skipping: set TS_LIVE=1 to run against the real Claude endpoint");

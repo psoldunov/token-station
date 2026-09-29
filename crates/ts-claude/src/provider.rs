@@ -53,9 +53,7 @@ fn probe_io(probe: &IoProbe, now: i64) -> IoCache {
         claude_binary_found: probe.binary_found,
         credentials_file_exists,
         credentials_expired: credentials_file_exists
-            && credentials::load(&probe.credentials)
-                .map(|c| c.expired(now))
-                .unwrap_or(false),
+            && credentials::load(&probe.credentials).is_ok_and(|c| c.expired(now)),
         projects_dir_exists: probe.projects.iter().any(|p| p.exists()),
     }
 }
@@ -63,6 +61,10 @@ fn probe_io(probe: &IoProbe, now: i64) -> IoCache {
 /// Filesystem/process facts `snapshot` needs but must never fetch itself.
 /// Refreshed from `refresh_limits`/`refresh_tokens`; read as a plain cache.
 #[derive(Debug, Clone, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "four independent filesystem probes, each observed separately; grouping them into an enum would lose the fact that any combination can hold at once"
+)]
 struct IoCache {
     claude_binary_found: bool,
     credentials_file_exists: bool,
@@ -88,6 +90,13 @@ pub struct ClaudeProvider {
     /// state with no offsets and re-read every transcript of the last eight days.
     scan_state: Arc<tokio::sync::Mutex<LogScanState>>,
     version_cache: Mutex<Option<String>>,
+    /// Outer `Option`: whether the `PATH` walk has run. Inner: whether it
+    /// found a binary. A successful lookup that found nothing must still be
+    /// cached, so the two levels cannot be flattened.
+    #[expect(
+        clippy::option_option,
+        reason = "outer level is `lookup performed`, inner is `binary found`; flattening would re-walk PATH on every miss"
+    )]
     binary_cache: Mutex<Option<Option<PathBuf>>>,
 }
 
@@ -149,7 +158,10 @@ impl ClaudeProvider {
 
     /// The `claude` binary, discovered once. Blocking: it walks `PATH`.
     fn claude_binary(&self) -> Option<PathBuf> {
-        let mut cache = self.binary_cache.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cache = self
+            .binary_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(cached) = cache.as_ref() {
             return cached.clone();
         }
@@ -163,7 +175,7 @@ impl ClaudeProvider {
         if let Some(cached) = self
             .binary_cache
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
         {
             return cached;
@@ -175,7 +187,10 @@ impl ClaudeProvider {
                 tracing::warn!(%error, "the claude binary lookup did not run");
                 None
             });
-        *self.binary_cache.lock().unwrap_or_else(|e| e.into_inner()) = Some(found.clone());
+        *self
+            .binary_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(found.clone());
         found
     }
 
@@ -184,7 +199,10 @@ impl ClaudeProvider {
             return self.config.user_agent.clone();
         }
         {
-            let cached = self.version_cache.lock().unwrap_or_else(|e| e.into_inner());
+            let cached = self
+                .version_cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(ua) = cached.as_ref() {
                 return ua.clone();
             }
@@ -193,7 +211,10 @@ impl ClaudeProvider {
             Some(v) => format!("claude-code/{v}"),
             None => FALLBACK_USER_AGENT.to_string(),
         };
-        *self.version_cache.lock().unwrap_or_else(|e| e.into_inner()) = Some(ua.clone());
+        *self
+            .version_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ua.clone());
         ua
     }
 
@@ -230,7 +251,10 @@ impl ClaudeProvider {
     }
 
     fn should_check_auth_status(&self, now: i64) -> bool {
-        let st = self.limits.read().unwrap_or_else(|e| e.into_inner());
+        let st = self
+            .limits
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         st.last_auth_status_check
             .is_none_or(|t| now - t >= AUTH_STATUS_MIN_INTERVAL_SECS)
     }
@@ -238,7 +262,7 @@ impl ClaudeProvider {
     fn mark_auth_status_checked(&self, now: i64) {
         self.limits
             .write()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .last_auth_status_check = Some(now);
     }
 
@@ -263,30 +287,42 @@ impl ClaudeProvider {
     }
 
     fn store_io_cache(&self, cache: IoCache) {
-        *self.io_cache.write().unwrap_or_else(|e| e.into_inner()) = cache;
+        *self
+            .io_cache
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = cache;
     }
 
     fn set_last_outcome(&self, outcome: LastOutcome) {
         self.limits
             .write()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .last_outcome = outcome;
     }
 
     fn reset_backoff(&self) {
-        let mut st = self.limits.write().unwrap_or_else(|e| e.into_inner());
+        let mut st = self
+            .limits
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         st.backoff_until = None;
         st.backoff_current_secs = 0;
     }
 
     fn disable_endpoint(&self, message: String) {
-        let mut st = self.limits.write().unwrap_or_else(|e| e.into_inner());
+        let mut st = self
+            .limits
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         st.endpoint_disabled = true;
         st.disabled_message = Some(message);
     }
 
     fn apply_backoff(&self, retry_after_secs: Option<u64>, now: i64) {
-        let mut st = self.limits.write().unwrap_or_else(|e| e.into_inner());
+        let mut st = self
+            .limits
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (until, current) = state::backoff_after_rate_limit(
             st.backoff_current_secs,
             retry_after_secs,
@@ -298,7 +334,10 @@ impl ClaudeProvider {
     }
 
     fn store_parsed(&self, parsed: oauth_usage::ParsedUsage, creds: &Credentials, now: i64) {
-        let mut obs = self.observations.write().unwrap_or_else(|e| e.into_inner());
+        let mut obs = self
+            .observations
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         obs.endpoint_windows = parsed.windows;
         obs.credits = parsed.credits;
         obs.breakdown = parsed.breakdown;
@@ -325,8 +364,7 @@ impl ClaudeProvider {
 fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
 const SIGN_IN_EXPIRED_MESSAGE: &str = "Sign-in expired. Open Claude Code to refresh it.";
@@ -344,7 +382,10 @@ impl Provider for ClaudeProvider {
         // Check-and-record happens under one write lock so two concurrent
         // callers can never both observe `Proceed` for the same interval.
         let decision = {
-            let mut st = self.limits.write().unwrap_or_else(|e| e.into_inner());
+            let mut st = self
+                .limits
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             state::decide(&mut st, &self.config, now, force)
         };
         match decision {
@@ -357,12 +398,9 @@ impl Provider for ClaudeProvider {
         }
 
         let creds_path = self.credentials_path();
-        let mut creds = match credentials::load(&creds_path) {
-            Ok(c) => c,
-            Err(_) => {
-                self.set_last_outcome(LastOutcome::Skipped(NOT_SIGNED_IN_MESSAGE.to_string()));
-                return RefreshOutcome::Skipped(NOT_SIGNED_IN_MESSAGE.to_string());
-            }
+        let Ok(mut creds) = credentials::load(&creds_path) else {
+            self.set_last_outcome(LastOutcome::Skipped(NOT_SIGNED_IN_MESSAGE.to_string()));
+            return RefreshOutcome::Skipped(NOT_SIGNED_IN_MESSAGE.to_string());
         };
 
         if creds.expired(now) {
@@ -446,7 +484,10 @@ impl Provider for ClaudeProvider {
             return;
         }
         let cutoff = now - TOKEN_RETENTION_SECS;
-        let mut guard = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self
+            .ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let ledger = std::mem::take(&mut *guard);
         *guard = ledger.with_events(events).pruned(cutoff);
     }
@@ -454,9 +495,18 @@ impl Provider for ClaudeProvider {
     fn snapshot(&self, now: i64) -> ProviderSnapshot {
         // Fixed lock order (see the field comment on `ClaudeProvider`): never
         // acquire these in a different order elsewhere.
-        let limits = self.limits.read().unwrap_or_else(|e| e.into_inner());
-        let obs = self.observations.read().unwrap_or_else(|e| e.into_inner());
-        let io = self.io_cache.read().unwrap_or_else(|e| e.into_inner());
+        let limits = self
+            .limits
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let obs = self
+            .observations
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let io = self
+            .io_cache
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let windows = state::merge_windows(
             &obs.endpoint_windows,
@@ -492,24 +542,36 @@ impl Provider for ClaudeProvider {
 
         let mut snap = ProviderSnapshot::empty(ProviderId::Claude, provider_state);
         snap.message = message;
-        snap.plan = obs.plan.clone();
+        snap.plan.clone_from(&obs.plan);
         snap.windows = windows;
-        snap.credits = obs.credits.clone();
-        snap.breakdown = obs.breakdown.clone();
+        snap.credits.clone_from(&obs.credits);
+        snap.breakdown.clone_from(&obs.breakdown);
         snap.updated_at = obs.last_endpoint_success_at;
 
-        let ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
+        let ledger = self
+            .ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !ledger.is_empty() {
             let now_dt = chrono::DateTime::from_timestamp(now, 0).unwrap_or_else(chrono::Utc::now);
-            let pricing = self.pricing.read().unwrap_or_else(|e| e.into_inner());
+            let pricing = self
+                .pricing
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             snap.tokens = Some(ledger.report(now_dt, &chrono::Local, &pricing));
         }
         snap
     }
 
     fn next_limits_refresh(&self, now: i64, default_interval: Duration) -> Duration {
-        let limits = self.limits.read().unwrap_or_else(|e| e.into_inner());
-        let obs = self.observations.read().unwrap_or_else(|e| e.into_inner());
+        let limits = self
+            .limits
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let obs = self
+            .observations
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let resets = obs.endpoint_windows.iter().filter_map(|w| w.resets_at);
         state::next_limits_refresh(
             &limits,
@@ -524,7 +586,10 @@ impl Provider for ClaudeProvider {
         let Ingest::ClaudeStatusline(json) = payload;
         match statusline::parse(&json, now) {
             Ok(Some(observation)) => {
-                let mut obs = self.observations.write().unwrap_or_else(|e| e.into_inner());
+                let mut obs = self
+                    .observations
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let Some(w) = observation.session {
                     obs.statusline_session = Some(w);
                 }

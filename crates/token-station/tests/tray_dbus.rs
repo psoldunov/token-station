@@ -109,7 +109,7 @@ async fn a_new_snapshot_reaches_the_tray() {
         loop {
             match inbox.recv().await.expect("the watcher is alive") {
                 Update::Daemon(Some(snapshot)) if snapshot.revision == 2 => return snapshot,
-                _ => continue,
+                _ => {}
             }
         }
     })

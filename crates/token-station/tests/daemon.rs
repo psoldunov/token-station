@@ -223,6 +223,10 @@ async fn an_unchanged_snapshot_does_not_bump_the_revision() {
     assert_eq!(h.claude.token_refreshes.load(Ordering::SeqCst), 2);
 }
 
+#[expect(
+    clippy::float_cmp,
+    reason = "compares exact literals that never went through arithmetic"
+)]
 #[tokio::test]
 async fn set_settings_writes_the_config_and_applies_it() {
     let h = harness(70.0);
@@ -254,6 +258,10 @@ async fn invalid_settings_are_rejected_without_touching_the_file() {
     assert_eq!(h.daemon.config(), Config::default());
 }
 
+#[expect(
+    clippy::float_cmp,
+    reason = "compares exact literals that never went through arithmetic"
+)]
 #[tokio::test]
 async fn the_config_file_is_hot_reloaded() {
     let h = harness(10.0);
@@ -511,6 +519,10 @@ async fn set_settings_refuses_a_config_file_it_must_not_rewrite() {
     assert_eq!(h.daemon.config(), Config::default());
 }
 
+#[expect(
+    clippy::float_cmp,
+    reason = "compares exact literals that never went through arithmetic"
+)]
 #[tokio::test]
 async fn a_switched_config_symlink_is_picked_up_even_with_an_unchanged_mtime() {
     let h = harness(10.0);

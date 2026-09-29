@@ -39,8 +39,7 @@ fn well_known_dirs(home: &Path, user: Option<&str>) -> Vec<PathBuf> {
 
 fn is_executable(path: &Path) -> bool {
     path.metadata()
-        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
+        .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
 /// Inputs for [`find_binary_in`], separated from the process environment for tests.
@@ -53,6 +52,7 @@ pub struct SearchEnv {
 
 impl SearchEnv {
     /// The current process environment.
+    #[must_use]
     pub fn current() -> SearchEnv {
         SearchEnv {
             path: env::var("PATH").ok(),
@@ -90,11 +90,13 @@ pub fn find_binary_in(name: &str, override_path: &str, env: &SearchEnv) -> Optio
 }
 
 /// [`find_binary_in`] with the current process environment.
+#[must_use]
 pub fn find_binary(name: &str, override_path: &str) -> Option<PathBuf> {
     find_binary_in(name, override_path, &SearchEnv::current())
 }
 
 /// Expand a leading `~/` against `home`.
+#[must_use]
 pub fn expand_tilde(path: &str, home: &Path) -> PathBuf {
     match path.strip_prefix("~/") {
         Some(rest) => home.join(rest),

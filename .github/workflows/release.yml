@@ -31,6 +31,9 @@ jobs:
       - name: nix flake check
         run: nix flake check -L --keep-going
 
+      - name: cargo deny check advisories
+        run: nix shell --inputs-from . nixpkgs#cargo nixpkgs#cargo-deny -c cargo deny --locked check advisories
+
   build:
     needs: check
     strategy:

@@ -1,4 +1,4 @@
-//! API-equivalent pricing from LiteLLM's `model_prices_and_context_window.json`.
+//! API-equivalent pricing from `LiteLLM`'s `model_prices_and_context_window.json`.
 //!
 //! A subset is vendored in `data/pricing/litellm-subset.json`; the daemon may merge a
 //! fresher copy on top with [`Pricing::merged`].
@@ -35,6 +35,11 @@ pub struct ModelPrice {
 
 impl ModelPrice {
     /// Cost of one request.
+    #[must_use]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "token counts stay far below 2^53, where f64 is still exact"
+    )]
     pub fn cost(&self, counts: &TokenCounts) -> f64 {
         let long = counts.prompt_tokens() > LONG_CONTEXT_THRESHOLD;
         let pick = |base: f64, above: Option<f64>| if long { above.unwrap_or(base) } else { base };
@@ -79,11 +84,17 @@ pub struct Pricing {
 
 impl Pricing {
     /// The vendored snapshot compiled into the binary.
+    #[must_use]
     pub fn bundled() -> Pricing {
         Pricing::from_litellm_json(BUNDLED_JSON).unwrap_or_default()
     }
 
-    /// Parse LiteLLM's JSON. Entries without input/output prices are skipped.
+    /// Parse `LiteLLM`'s JSON. Entries without input/output prices are skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PricingError::Parse`] when `text` is not a JSON object, and
+    /// [`PricingError::Empty`] when no entry carried a usable price.
     pub fn from_litellm_json(text: &str) -> Result<Pricing, PricingError> {
         let raw: HashMap<String, serde_json::Value> = serde_json::from_str(text)?;
         let models: HashMap<String, ModelPrice> = raw
@@ -101,16 +112,19 @@ impl Pricing {
     }
 
     /// `other`'s entries override `self`'s.
+    #[must_use]
     pub fn merged(&self, other: &Pricing) -> Pricing {
         let mut models = self.models.clone();
         models.extend(other.models.iter().map(|(k, v)| (k.clone(), v.clone())));
         Pricing { models }
     }
 
+    #[must_use]
     pub fn len(&self) -> usize {
         self.models.len()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.models.is_empty()
     }
@@ -118,6 +132,7 @@ impl Pricing {
     /// Find a price for a model id as written by the CLIs, tolerating provider
     /// prefixes (`anthropic/`), bracket suffixes (`[1m]`) and date suffixes
     /// (`-20250929`).
+    #[must_use]
     pub fn lookup(&self, model: &str) -> Option<&ModelPrice> {
         candidates(model)
             .into_iter()
@@ -125,6 +140,7 @@ impl Pricing {
     }
 
     /// Cost of one request, or `None` when the model is unknown.
+    #[must_use]
     pub fn cost(&self, model: &str, counts: &TokenCounts) -> Option<f64> {
         self.lookup(model).map(|price| price.cost(counts))
     }
@@ -168,6 +184,7 @@ fn strip_date_suffix(model: &str) -> String {
 pub type SharedPricing = std::sync::Arc<std::sync::RwLock<Pricing>>;
 
 /// A [`SharedPricing`] holding the bundled table.
+#[must_use]
 pub fn shared_bundled() -> SharedPricing {
     std::sync::Arc::new(std::sync::RwLock::new(Pricing::bundled()))
 }
@@ -247,6 +264,10 @@ mod tests {
         assert_cost("gpt-5.3-codex", counts(0, 0, 0, 1_000), 1_000.0 * 1.25e-6);
     }
 
+    #[expect(
+        clippy::float_cmp,
+        reason = "compares exact literals that never went through arithmetic"
+    )]
     #[test]
     fn merged_overrides() {
         let base = table();
