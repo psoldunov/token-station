@@ -84,7 +84,12 @@ fn base_env(dir: &Path, binary: PathBuf) -> CodexEnv {
         http_base_url: "http://127.0.0.1:1".to_string(), // unused unless a test overrides it
         http_timeouts: HttpTimeouts::default(),
         search: SearchEnv {
-            path: None,
+            // The real `PATH`, because the fake `codex` is a shell script that
+            // runs `cat`, and the child's `PATH` is built from this one — as it
+            // is in production, where `SearchEnv::current` always carries it.
+            // Discovery itself is not using it: `binary_override` names the
+            // script outright.
+            path: std::env::var("PATH").ok(),
             home: dir.to_path_buf(),
             user: None,
         },
@@ -495,12 +500,33 @@ async fn live_app_server_round_trip() {
     assert_ne!(snapshot.state, ProviderState::Loading);
 }
 
+/// Is `pid` a live process, rather than gone or a zombie waiting to be reaped?
+///
+/// Not `kill(pid, 0)`, which a zombie still answers: what this asks is whether
+/// the child is still *running*, and a killed-but-unreaped child is not.
+#[cfg(target_os = "linux")]
 fn process_alive(pid: &str) -> bool {
     fs::read_to_string(format!("/proc/{pid}/status")).is_ok_and(|status| {
         !status
             .lines()
             .any(|l| l.starts_with("State:") && l.contains('Z'))
     })
+}
+
+/// As above, through `ps`: macOS has no `/proc`.
+///
+/// `/bin/ps` by absolute path, because the test runs with whatever `PATH` the
+/// build gave it.
+#[cfg(not(target_os = "linux"))]
+fn process_alive(pid: &str) -> bool {
+    std::process::Command::new("/bin/ps")
+        .args(["-o", "state=", "-p", pid])
+        .output()
+        .is_ok_and(|output| {
+            let state = String::from_utf8_lossy(&output.stdout);
+            let state = state.trim();
+            !state.is_empty() && !state.starts_with('Z')
+        })
 }
 
 #[tokio::test]

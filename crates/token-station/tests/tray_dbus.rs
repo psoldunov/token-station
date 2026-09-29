@@ -1,3 +1,6 @@
+#![cfg(not(target_os = "macos"))]
+//! Linux only: the session bus, the tray and the desktop integration.
+
 //! The tray's D-Bus watcher against a real daemon object on a private bus.
 
 mod common;
@@ -71,7 +74,9 @@ async fn serve(bus: &common::PrivateBus, initial: Snapshot) -> (zbus::Connection
     )
     .await
     .expect("object served");
-    publisher.attach(connection.clone());
+    publisher.attach(std::sync::Arc::new(
+        token_station::dbus::sink::PropertiesSink::new(connection.clone()),
+    ));
     let reply = connection
         .request_name_with_flags(BUS_NAME, RequestNameFlags::DoNotQueue.into())
         .await

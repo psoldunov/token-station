@@ -1,3 +1,6 @@
+#![cfg(not(target_os = "macos"))]
+//! Linux only: the session bus, the tray and the desktop integration.
+
 //! Renders the tray icon for every fixture and writes PNG previews you can look at.
 //!
 //! Output: `/tmp/ts-tray-icons/<fixture>-<scheme>-<size>.png`, each composited over

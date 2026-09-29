@@ -1,5 +1,6 @@
-//! Reads `.credentials.json`. Never writes it, never refreshes it, never logs
-//! the tokens it holds.
+//! Parses the Claude Code sign-in document, and reads it from
+//! `.credentials.json`. Never writes it, never refreshes it, never logs the
+//! tokens it holds. [`crate::store`] decides where the document comes from.
 
 use std::path::Path;
 
@@ -8,12 +9,19 @@ use serde::Deserialize;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CredentialsError {
-    #[error("credentials file not found")]
+    #[error("no Claude Code sign-in found")]
     NotFound,
     #[error("cannot read credentials file: {0}")]
     Read(std::io::Error),
-    #[error("cannot parse credentials file: {0}")]
+    /// The document was found and is not one — from the file or, on macOS,
+    /// from the Keychain, which is why this does not say "file".
+    #[error("cannot parse the Claude Code sign-in: {0}")]
     Parse(serde_json::Error),
+    /// The sign-in is very probably there and this process cannot see it —
+    /// a locked or session-less login Keychain, for instance. Distinct from
+    /// [`CredentialsError::NotFound`], which says there is nothing to see.
+    #[error("{0}")]
+    Unavailable(String),
 }
 
 // Neither struct derives `Debug`: both hold the raw access token string
@@ -55,8 +63,32 @@ impl Credentials {
     }
 }
 
+/// Parse one sign-in document, wherever it came from.
+///
+/// # Errors
+///
+/// Returns [`CredentialsError::Parse`] when `text` is not a Claude Code
+/// credentials document.
+pub fn parse(text: &str) -> Result<Credentials, CredentialsError> {
+    let parsed: CredentialsFile = serde_json::from_str(text).map_err(CredentialsError::Parse)?;
+    let oauth = parsed.claude_ai_oauth;
+    Ok(Credentials {
+        access_token: SecretString::from(oauth.access_token),
+        expires_at_ms: oauth.expires_at,
+        subscription_type: oauth.subscription_type,
+        rate_limit_tier: oauth.rate_limit_tier,
+    })
+}
+
 /// Load credentials from `path`. Only reads; never touches the file's mtime or
 /// content.
+///
+/// # Errors
+///
+/// Returns [`CredentialsError::NotFound`] when `path` does not exist,
+/// [`CredentialsError::Read`] when it cannot be read, and
+/// [`CredentialsError::Parse`] when its contents are not a credentials
+/// document.
 pub fn load(path: &Path) -> Result<Credentials, CredentialsError> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
@@ -65,14 +97,7 @@ pub fn load(path: &Path) -> Result<Credentials, CredentialsError> {
         }
         Err(e) => return Err(CredentialsError::Read(e)),
     };
-    let parsed: CredentialsFile = serde_json::from_str(&text).map_err(CredentialsError::Parse)?;
-    let oauth = parsed.claude_ai_oauth;
-    Ok(Credentials {
-        access_token: SecretString::from(oauth.access_token),
-        expires_at_ms: oauth.expires_at,
-        subscription_type: oauth.subscription_type,
-        rate_limit_tier: oauth.rate_limit_tier,
-    })
+    parse(&text)
 }
 
 #[cfg(test)]

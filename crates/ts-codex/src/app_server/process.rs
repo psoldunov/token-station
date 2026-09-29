@@ -5,6 +5,7 @@ use std::process::Stdio;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
+use ts_core::discovery::{SearchEnv, child_path_in};
 
 use super::rpc::AppServerClient;
 
@@ -28,9 +29,20 @@ pub struct AppServerProcess {
 }
 
 /// Spawn `binary app-server` with piped stdio; forward stderr to `tracing::debug!`.
-pub fn spawn(binary: &Path) -> Result<AppServerProcess, SpawnError> {
+///
+/// The child is given the `PATH` from [`child_path_in`] rather than the one
+/// this process inherited: a `codex` installed by a JavaScript package manager
+/// is a script that needs its interpreter on `PATH`, and the daemon's own is
+/// whatever Finder or systemd handed it.
+///
+/// # Errors
+///
+/// Returns [`SpawnError::Spawn`] when the binary cannot be started and
+/// [`SpawnError::NoStdio`] when the child's pipes are missing.
+pub fn spawn(binary: &Path, env: &SearchEnv) -> Result<AppServerProcess, SpawnError> {
     let mut child = Command::new(binary)
         .arg("app-server")
+        .env("PATH", child_path_in(binary, env))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -62,9 +74,29 @@ async fn forward_stderr(stderr: tokio::process::ChildStderr) {
 mod tests {
     use super::*;
 
+    fn env() -> SearchEnv {
+        SearchEnv {
+            path: Some("/usr/bin:/bin".into()),
+            home: std::path::PathBuf::from("/home/u"),
+            user: None,
+        }
+    }
+
     #[tokio::test]
     async fn spawn_fails_for_missing_binary() {
-        let result = spawn(Path::new("/definitely/does/not/exist/codex"));
+        let result = spawn(Path::new("/definitely/does/not/exist/codex"), &env());
         assert!(matches!(result, Err(SpawnError::Spawn { .. })));
+    }
+
+    #[tokio::test]
+    async fn the_child_gets_a_path_that_can_find_an_interpreter() {
+        // What the child would be given: the inherited entries first, then the
+        // binary's own directory, which is where a package-manager install puts
+        // the interpreter its script needs.
+        let binary = Path::new("/home/u/.local/bin/codex");
+        let path = child_path_in(binary, &env());
+        let built = path.to_string_lossy().into_owned();
+        assert!(built.starts_with("/usr/bin:/bin:"), "{built}");
+        assert!(built.contains("/home/u/.local/bin"), "{built}");
     }
 }

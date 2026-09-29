@@ -599,7 +599,7 @@ impl CodexProvider {
             if !inner.process_backoff.ready(now) {
                 return Err("app-server is backing off after a recent failure".to_string());
             }
-            match app_server::spawn(binary) {
+            match app_server::spawn(binary, &self.env.search) {
                 Ok(process) => {
                     inner.session = Some(Session {
                         process,

@@ -3,12 +3,14 @@
 
 mod credentials;
 mod env;
+pub mod keychain;
 mod labels;
 mod logs;
 mod oauth_usage;
 mod provider;
 mod state;
 mod statusline;
+pub mod store;
 
 pub use env::ClaudeEnv;
 pub use provider::ClaudeProvider;

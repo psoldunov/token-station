@@ -33,8 +33,13 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["net", "io-std"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
-zbus.workspace = true
 reqwest.workspace = true
+
+# The session bus and the StatusNotifierItem tray: Linux's front end and
+# Linux's alone. macOS has no session bus, so it serves the same interface over
+# a Unix socket and ships a menu bar app instead.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+zbus.workspace = true
 ksni.workspace = true
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 

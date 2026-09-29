@@ -10,6 +10,9 @@ pub struct ClaudeEnv {
     pub home: PathBuf,
     /// Value of `$CLAUDE_CONFIG_DIR`, if set.
     pub claude_config_dir: Option<String>,
+    /// Value of `$CLAUDE_SECURESTORAGE_CONFIG_DIR`, if set. Only macOS reads
+    /// it, and "set but empty" is a value of its own there.
+    pub claude_securestorage_config_dir: Option<String>,
     /// Base URL of the OAuth usage endpoint, e.g. `https://api.anthropic.com`.
     pub api_base_url: String,
     /// Explicit `claude` binary path, bypassing discovery (tests only).
@@ -26,6 +29,7 @@ impl ClaudeEnv {
         ClaudeEnv {
             home: SearchEnv::current().home,
             claude_config_dir: std::env::var("CLAUDE_CONFIG_DIR").ok(),
+            claude_securestorage_config_dir: std::env::var("CLAUDE_SECURESTORAGE_CONFIG_DIR").ok(),
             api_base_url: "https://api.anthropic.com".to_string(),
             claude_binary: None,
             search: SearchEnv::current(),
@@ -62,6 +66,7 @@ mod tests {
         ClaudeEnv {
             home: PathBuf::from(home),
             claude_config_dir: claude_config_dir.map(str::to_string),
+            claude_securestorage_config_dir: None,
             api_base_url: "https://api.anthropic.com".to_string(),
             claude_binary: None,
             search: SearchEnv {

@@ -1,7 +1,7 @@
 //! `token-station statusline`: Claude Code's statusline hook.
 //!
-//! Claude Code runs this on every turn, so it must stay cheap: one short D-Bus call
-//! with a hard timeout, and a file drop when the daemon is not there to answer. It
+//! Claude Code runs this on every turn, so it must stay cheap: one short call to
+//! the daemon with a hard timeout, and a file drop when it does not answer. It
 //! also must never fail — a non-zero exit turns the user's status line into an
 //! error message — so every step here degrades instead of returning.
 
@@ -12,10 +12,10 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use crate::atomic::write_atomic;
-use crate::dbus::client;
 use crate::notify::compact_duration;
 use crate::output;
 use crate::paths::Paths;
+use crate::remote;
 
 /// Largest payload handed to the daemon, over the bus or through the drop box.
 pub const MAX_PAYLOAD_BYTES: usize = 64 * 1024;
@@ -106,20 +106,10 @@ pub fn compact_line_with_reset(payload: &str, resets_in: Option<i64>) -> String 
 ///
 /// # Errors
 ///
-/// Returns a message when the session bus is unreachable, when the daemon proxy
-/// cannot be built, when the call does not answer within [`CALL_TIMEOUT`], or
-/// when the daemon rejects the payload.
-pub async fn deliver(payload: &str) -> Result<(), String> {
-    let connection = zbus::Connection::session()
-        .await
-        .map_err(|e| e.to_string())?;
-    let proxy = client::connect(&connection)
-        .await
-        .map_err(|e| e.to_string())?;
-    tokio::time::timeout(CALL_TIMEOUT, proxy.ingest_claude_statusline(payload))
-        .await
-        .map_err(|_| "timed out".to_string())?
-        .map_err(|e| e.to_string())
+/// Returns a message when the daemon cannot be reached, when it does not answer
+/// within [`CALL_TIMEOUT`], or when it rejects the payload.
+pub async fn deliver(payload: &str, paths: &Paths) -> Result<(), String> {
+    remote::ingest_statusline(paths, payload, CALL_TIMEOUT).await
 }
 
 /// Blocking wrapper: a one-thread runtime just for this call.
@@ -128,12 +118,12 @@ pub async fn deliver(payload: &str) -> Result<(), String> {
 ///
 /// Returns a message when the one-thread runtime cannot be built, plus whatever
 /// [`deliver`] itself reports.
-pub fn deliver_blocking(payload: &str) -> Result<(), String> {
+pub fn deliver_blocking(payload: &str, paths: &Paths) -> Result<(), String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|e| e.to_string())?;
-    runtime.block_on(deliver(payload))
+    runtime.block_on(deliver(payload, paths))
 }
 
 /// Leave the payload where the daemon will find it on its next tokens tick.
@@ -153,7 +143,7 @@ fn deliver_or_drop(payload: &str, paths: &Paths) {
         return;
     }
     let capped = truncate_to(payload, MAX_PAYLOAD_BYTES);
-    if let Err(error) = deliver_blocking(capped) {
+    if let Err(error) = deliver_blocking(capped, paths) {
         tracing::debug!(%error, "daemon unreachable, leaving the statusline on disk");
         if let Err(error) = drop_to_disk(&paths.statusline_drop(), capped) {
             tracing::debug!(%error, "cannot leave the statusline on disk");
@@ -451,6 +441,9 @@ mod tests {
         assert!(run_wrapped("exit 7", b"", WRAP_TIMEOUT).is_empty());
     }
 
+    /// Claude Code runs this on every turn, so an absent daemon has to be an
+    /// absent daemon quickly, whichever transport it would have used.
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn delivering_without_a_bus_fails_quickly() {
         let started = Instant::now();
@@ -459,7 +452,21 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(2), "must stay fast");
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn delivering_without_a_socket_fails_quickly() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut paths = Paths::current();
+        paths.socket = dir.path().join("nothing-listens-here.sock");
+        let started = Instant::now();
+        assert!(deliver_blocking("{}", &paths).is_err());
+        assert!(started.elapsed() < Duration::from_secs(2), "must stay fast");
+    }
+
+    #[cfg(not(target_os = "macos"))]
     fn deliver_blocking_with_address(address: &str) -> Result<(), String> {
+        use crate::dbus::client;
+
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

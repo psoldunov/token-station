@@ -70,11 +70,17 @@ async fn expired_credentials_are_refreshed_via_auth_status_at_most_once() {
     };
     let env = ClaudeEnv {
         home: dir.path().to_path_buf(),
+        claude_securestorage_config_dir: None,
         claude_config_dir: None,
         api_base_url: server.uri(),
         claude_binary: Some(script),
         search: ts_core::discovery::SearchEnv {
-            path: None,
+            // The real `PATH`, because the fake `claude` is a shell script that
+            // runs `cp`, and the child's `PATH` is built from this one — as it
+            // is in production, where `SearchEnv::current` always carries it.
+            // Discovery itself is not using it: `claude_binary` names the
+            // script outright.
+            path: std::env::var("PATH").ok(),
             home: dir.path().to_path_buf(),
             user: None,
         },

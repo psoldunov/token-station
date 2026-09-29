@@ -1,6 +1,6 @@
 //! `token-station status` and `token-station refresh`.
 //!
-//! With a daemon on the bus both commands are one D-Bus call. Without one, `status`
+//! With a daemon running both commands are one call to it. Without one, `status`
 //! runs the providers once in-process so it still answers.
 
 use std::sync::Arc;
@@ -12,11 +12,11 @@ use ts_core::{ProviderState, Snapshot, TokenTotals};
 
 use crate::clock::system_clock;
 use crate::daemon::providers;
-use crate::dbus::client;
 use crate::notify::compact_duration;
 use crate::output;
 use crate::paths::Paths;
 use crate::pricing_refresh;
+use crate::remote;
 
 /// Human-readable status: one line per window, then the local token totals.
 #[must_use]
@@ -116,16 +116,12 @@ pub fn format_count(value: u64) -> String {
 ///
 /// # Errors
 ///
-/// Returns an error when a running daemon is found but its proxy cannot be
-/// built, its `Snapshot` call fails, or the JSON it sends back is unreadable.
-/// No daemon at all is not an error: the providers are read in process.
+/// Returns an error when a running daemon is found but cannot be reached, its
+/// snapshot call fails, or the JSON it sends back is unreadable. No daemon at
+/// all is not an error: the providers are read in process.
 pub async fn current_snapshot(paths: &Paths) -> anyhow::Result<Snapshot> {
-    if let Ok(connection) = zbus::Connection::session().await {
-        if client::daemon_is_running(&connection).await {
-            let proxy = client::connect(&connection).await?;
-            let json = proxy.snapshot().await?;
-            return serde_json::from_str(&json).context("the daemon sent an unreadable snapshot");
-        }
+    if let Some(json) = remote::snapshot_json(paths).await {
+        return serde_json::from_str(&json?).context("the daemon sent an unreadable snapshot");
     }
     Ok(run_providers_once(paths).await)
 }
@@ -136,7 +132,22 @@ async fn run_providers_once(paths: &Paths) -> Snapshot {
     let pricing = Arc::new(std::sync::RwLock::new(pricing_refresh::bundled_with_cache(
         &paths.pricing_cache(),
     )));
-    let built = providers::build_all(&config, &pricing);
+    // Building a provider reads the disk, and on macOS it runs
+    // `/usr/bin/security` and may wait ten seconds there. That is not work for
+    // a runtime thread, which is the same reason the daemon builds its own
+    // providers on a blocking one.
+    let built = {
+        let for_build = config.clone();
+        let pricing = Arc::clone(&pricing);
+        match tokio::task::spawn_blocking(move || providers::build_all(&for_build, &pricing)).await
+        {
+            Ok(built) => built,
+            Err(error) => {
+                tracing::error!(%error, "the provider setup did not run");
+                return assemble(1, system_clock()(), &[], &config);
+            }
+        }
+    };
     let mut snapshots = Vec::new();
     for provider in built.values() {
         provider.refresh_limits(true).await;
@@ -167,18 +178,10 @@ pub async fn status(paths: &Paths, as_json: bool) -> anyhow::Result<()> {
 ///
 /// # Errors
 ///
-/// Returns an error when the session bus is unreachable, when no daemon owns the
-/// well-known name, or when the `Refresh` call itself fails.
-pub async fn refresh() -> anyhow::Result<()> {
-    let connection = zbus::Connection::session()
-        .await
-        .context("cannot connect to the session bus")?;
-    anyhow::ensure!(
-        client::daemon_is_running(&connection).await,
-        "no token-station daemon is running"
-    );
-    client::connect(&connection).await?.refresh().await?;
-    Ok(())
+/// Returns an error when no daemon is running, when it cannot be reached, or
+/// when the `Refresh` call itself fails.
+pub async fn refresh(paths: &Paths) -> anyhow::Result<()> {
+    remote::refresh(paths).await
 }
 
 /// Defaults used when no config file exists, exposed for tests.

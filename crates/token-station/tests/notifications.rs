@@ -1,3 +1,6 @@
+#![cfg(not(target_os = "macos"))]
+//! Linux only: the session bus, the tray and the desktop integration.
+
 //! Alerts reach a notification server from inside the daemon's own runtime.
 //!
 //! This is the regression test for the panic a convenience wrapper caused: those

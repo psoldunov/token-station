@@ -36,6 +36,7 @@ impl Fixture {
     pub fn env(&self, api_base_url: &str) -> ClaudeEnv {
         ClaudeEnv {
             home: self.dir.path().to_path_buf(),
+            claude_securestorage_config_dir: None,
             claude_config_dir: None,
             api_base_url: api_base_url.to_string(),
             claude_binary: None,
