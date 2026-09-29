@@ -234,7 +234,16 @@ plasmoidviewer -a frontends/plasma/dev.soldunov.tokenstation
 bash frontends/plasma/tests/render.sh         # offscreen renders of every fixture
 nix build -L .#checks.x86_64-linux.gnome-vm   # boots GNOME, loads the extension, screenshots
 nix flake check                               # clippy, tests, fmt, deny, machete, packages, VM test
-nix build .#appimage                          # static musl AppImage
+nix build .#appimage                          # static musl AppImage (CI builds it on master only)
+```
+
+CI substitutes from the public `psoldunov` Cachix cache, so a check already built for the
+same sources is not built again. Run the checks on the commit you are about to push and
+push the results, and CI's `nix flake check` only downloads them (needs `cachix authtoken`
+once):
+
+```sh
+cachix watch-exec psoldunov -- nix flake check -L
 ```
 
 Fixture mode serves `data/fixtures/*.json` with live countdowns, synthetic history and
