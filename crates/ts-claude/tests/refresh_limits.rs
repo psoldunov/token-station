@@ -21,16 +21,7 @@ fn provider_for(server: &MockServer) -> (ClaudeProvider, support::Fixture) {
     (provider, fixture)
 }
 
-/// A server that answers every `GET /api/oauth/usage` with `response`.
-async fn mock_oauth_usage(response: ResponseTemplate) -> MockServer {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/oauth/usage"))
-        .respond_with(response)
-        .mount(&server)
-        .await;
-    server
-}
+use support::mock_oauth_usage;
 
 /// Build a provider against `server` and run a single `refresh_limits(false)`.
 async fn refresh_once(server: &MockServer) -> (RefreshOutcome, ClaudeProvider, support::Fixture) {
@@ -129,14 +120,15 @@ async fn rate_limited_backs_off_using_retry_after() {
     assert!(next.as_secs() >= 100, "expected long backoff, got {next:?}");
 
     // Inside the backoff even a forced refresh stays off the network, and it
-    // leaves the 429 as what the snapshot reports.
+    // leaves the 429 as what the snapshot reports: with nothing to show yet,
+    // as a wait rather than an error.
     let during_backoff = provider.refresh_limits(true).await;
     assert!(matches!(during_backoff, RefreshOutcome::Skipped(_)));
     let snap = provider.snapshot(1_790_596_800);
-    assert_eq!(snap.state, ProviderState::Error);
+    assert_eq!(snap.state, ProviderState::Loading);
     assert_eq!(
         snap.message.as_deref(),
-        Some("Rate limited by Claude's usage endpoint.")
+        Some("Rate limited by Claude's usage endpoint; retrying automatically.")
     );
     assert_eq!(server.received_requests().await.map(|r| r.len()), Some(1));
 }

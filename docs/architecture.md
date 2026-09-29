@@ -90,7 +90,9 @@ pinned static type2 runtime, and it is assembled inside the Nix sandbox.
 On Linux:
 
 - Config: `$XDG_CONFIG_HOME/token-station/config.toml`
-- State: `$XDG_STATE_HOME/token-station/{history.sqlite,alerts.json,install-manifest.json}`
+- State: `$XDG_STATE_HOME/token-station/{history.sqlite,alerts.json,claude-limits.json,install-manifest.json}`
+  (`claude-limits.json` holds the last plan-limit reading and backoff, so a restart
+  picks them up)
 - Cache: `$XDG_CACHE_HOME/token-station/pricing.json`
 - Runtime: `$XDG_RUNTIME_DIR/token-station/claude-statusline.json` (where the statusline
   collector drops its data when the daemon is not reachable)
@@ -99,6 +101,7 @@ On macOS, where the XDG variables are ignored so the app, the CLI and Claude Cod
 statusline hook always agree:
 
 - Config, state and runtime: `~/Library/Application Support/dev.soldunov.TokenStation/`
-  (`config.toml`, `history.sqlite`, `alerts.json`, `claude-statusline.json`, and the
+  (`config.toml`, `history.sqlite`, `alerts.json`, `claude-limits.json`,
+  `claude-statusline.json`, and the
   daemon's `daemon.sock` and `daemon.lock`)
 - Cache: `~/Library/Caches/dev.soldunov.TokenStation/pricing.json`

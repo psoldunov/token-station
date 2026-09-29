@@ -4,17 +4,44 @@
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 
-/// A `dbus-daemon --session` that lives as long as this value.
+/// A session bus that activates nothing.
+///
+/// `dbus-daemon --session` reads the system's own session config, whose
+/// service directories include every installed `.service` file. On a machine
+/// with Token Station installed, a call to its name on the "empty" bus would
+/// start the installed daemon; a bus with no service directory cannot.
+const BUS_CONFIG: &str = r#"<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-BUS Bus Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+<busconfig>
+  <type>session</type>
+  <listen>unix:dir=@DIR@</listen>
+  <auth>EXTERNAL</auth>
+  <policy context="default">
+    <allow send_destination="*" eavesdrop="true"/>
+    <allow eavesdrop="true"/>
+    <allow own="*"/>
+  </policy>
+</busconfig>
+"#;
+
+/// A private `dbus-daemon` that lives as long as this value.
 pub struct PrivateBus {
     child: Child,
     pub address: String,
+    /// Holds the config and the socket; removed after the bus is gone.
+    _dir: tempfile::TempDir,
 }
 
 impl PrivateBus {
     /// Start a private bus, or `None` when `dbus-daemon` is not installed.
     pub fn start() -> Option<PrivateBus> {
+        let dir = tempfile::tempdir().ok()?;
+        let config = dir.path().join("bus.conf");
+        let contents = BUS_CONFIG.replace("@DIR@", &dir.path().to_string_lossy());
+        std::fs::write(&config, contents).ok()?;
         let mut child = Command::new("dbus-daemon")
-            .args(["--session", "--nofork", "--print-address"])
+            .arg(format!("--config-file={}", config.display()))
+            .args(["--nofork", "--print-address"])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
@@ -28,6 +55,7 @@ impl PrivateBus {
         Some(PrivateBus {
             child,
             address: address.trim().to_string(),
+            _dir: dir,
         })
     }
 

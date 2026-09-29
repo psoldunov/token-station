@@ -13,7 +13,7 @@ use ts_core::{Ingest, IngestError, Provider, ProviderId, ProviderSnapshot, Provi
 use crate::atomic::{Fingerprint, fingerprint, modified_secs, write_atomic};
 use crate::backend::{Backend, SetSettingsError};
 use crate::clock::Clock;
-use crate::daemon::providers;
+use crate::daemon::{providers, saved_limits};
 use crate::history::{HistoryHandle, OwnedSample};
 use crate::notify::{self, Notifier};
 use crate::paths::Paths;
@@ -44,6 +44,14 @@ pub struct Daemon {
     notifier: Arc<dyn Notifier>,
     statusline_seen: Mutex<Option<i64>>,
     last_prune: Mutex<Option<i64>>,
+    /// The bytes last written for each provider's saved limits. Async, and
+    /// held across the write, so two refreshes finishing together cannot land
+    /// an older state on disk after a newer one.
+    saved_limits: tokio::sync::Mutex<BTreeMap<ProviderId, Vec<u8>>>,
+    /// Set once every provider has been handed back its saved limits. Every
+    /// limits refresh waits on it, so none runs on a provider still missing
+    /// the backoff it saved on an earlier run.
+    limits_restored: tokio::sync::OnceCell<()>,
     clock: Clock,
 }
 
@@ -92,6 +100,8 @@ impl Daemon {
             notifier,
             statusline_seen: Mutex::new(None),
             last_prune: Mutex::new(None),
+            saved_limits: tokio::sync::Mutex::new(BTreeMap::new()),
+            limits_restored: tokio::sync::OnceCell::new(),
             clock,
         })
     }
@@ -134,9 +144,60 @@ impl Daemon {
         let Some(provider) = self.provider(id) else {
             return;
         };
+        self.ensure_limits_restored().await;
         let outcome = provider.refresh_limits(force).await;
         tracing::debug!(provider = %id, ?outcome, "limits refresh");
+        self.save_limits(provider.as_ref()).await;
         self.after_limits().await;
+    }
+
+    /// Hand every provider back what it asked to keep on an earlier run, then
+    /// publish, so a restart shows the last reading before the first refresh.
+    ///
+    /// Startup work, not part of building the daemon: a daemon that loses the
+    /// race for the bus name must not have read anything. Runs once; a
+    /// refresh that gets in first — the `Refresh` call that activated the
+    /// daemon — does it itself rather than going ahead without it.
+    pub async fn restore_saved_limits(&self) {
+        self.ensure_limits_restored().await;
+        self.republish().await;
+    }
+
+    /// Restore the saved limits unless that has happened, or wait for the
+    /// caller already doing it.
+    async fn ensure_limits_restored(&self) {
+        self.limits_restored
+            .get_or_init(|| self.read_saved_limits())
+            .await;
+    }
+
+    async fn read_saved_limits(&self) {
+        let providers: Vec<Arc<dyn Provider>> = read(&self.providers).values().cloned().collect();
+        for provider in providers {
+            let path = self.paths.saved_limits(provider.id());
+            if let Some(saved) = saved_limits::load(path).await {
+                provider.restore_state(saved, self.now());
+            }
+        }
+    }
+
+    /// Write down what `provider` wants kept across a restart, when it moved.
+    async fn save_limits(&self, provider: &dyn Provider) {
+        let id = provider.id();
+        let mut written = self.saved_limits.lock().await;
+        let Some(bytes) = provider
+            .saved_state()
+            .as_ref()
+            .and_then(saved_limits::encode)
+        else {
+            return;
+        };
+        if written.get(&id) == Some(&bytes) {
+            return;
+        }
+        if saved_limits::store(self.paths.saved_limits(id), bytes.clone()).await {
+            written.insert(id, bytes);
+        }
     }
 
     /// Scan local logs for every provider, then publish.
@@ -150,10 +211,12 @@ impl Daemon {
 
     /// A full forced refresh of everything (`Refresh()`, resume from sleep, startup).
     pub async fn refresh_all(&self, force: bool) {
+        self.ensure_limits_restored().await;
         let providers: Vec<Arc<dyn Provider>> = read(&self.providers).values().cloned().collect();
         for provider in &providers {
             let outcome = provider.refresh_limits(force).await;
             tracing::debug!(provider = %provider.id(), ?outcome, "limits refresh");
+            self.save_limits(provider.as_ref()).await;
             provider.refresh_tokens().await;
         }
         self.after_limits().await;

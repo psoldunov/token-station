@@ -11,6 +11,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use ts_core::ProviderId;
+
 /// Directory name used under every XDG root.
 pub const APP_DIR: &str = "token-station";
 
@@ -255,6 +257,13 @@ impl Paths {
         self.state_dir.join("alerts.json")
     }
 
+    /// What provider `id` asked to keep across a restart: its last plan-limit
+    /// reading and its rate-limit backoff.
+    #[must_use]
+    pub fn saved_limits(&self, id: ProviderId) -> PathBuf {
+        self.state_dir.join(format!("{id}-limits.json"))
+    }
+
     #[must_use]
     pub fn pricing_cache(&self) -> PathBuf {
         self.cache_dir.join("pricing.json")
@@ -290,6 +299,10 @@ mod tests {
             Path::new("/st/token-station/history.sqlite")
         );
         assert_eq!(p.alerts_file(), Path::new("/st/token-station/alerts.json"));
+        assert_eq!(
+            p.saved_limits(ProviderId::Claude),
+            Path::new("/st/token-station/claude-limits.json")
+        );
         assert_eq!(
             p.pricing_cache(),
             Path::new("/ca/token-station/pricing.json")
@@ -392,6 +405,10 @@ mod tests {
         assert_eq!(p.runtime_dir, Path::new(support));
         assert_eq!(p.history_db(), Path::new(support).join("history.sqlite"));
         assert_eq!(p.alerts_file(), Path::new(support).join("alerts.json"));
+        assert_eq!(
+            p.saved_limits(ProviderId::Codex),
+            Path::new(support).join("codex-limits.json")
+        );
         assert_eq!(p.socket_path(), Path::new(support).join("daemon.sock"));
         assert_eq!(p.lock_file(), Path::new(support).join("daemon.lock"));
         assert_eq!(

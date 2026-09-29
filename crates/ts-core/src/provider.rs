@@ -68,4 +68,20 @@ pub trait Provider: Send + Sync {
         let _ = (payload, now);
         Err(IngestError::Unsupported)
     }
+
+    /// What this provider wants kept across a daemon restart — its last
+    /// plan-limit reading, its rate-limit backoff — or `None`, the default,
+    /// when there is nothing worth keeping. Must not block or do IO: the
+    /// daemon does the writing.
+    fn saved_state(&self) -> Option<serde_json::Value> {
+        None
+    }
+
+    /// Take back what [`Provider::saved_state`] returned on an earlier run.
+    ///
+    /// The value comes off the disk, so anything unreadable, from another
+    /// version, or implausible for `now` is dropped rather than trusted.
+    fn restore_state(&self, saved: serde_json::Value, now: i64) {
+        let _ = (saved, now);
+    }
 }

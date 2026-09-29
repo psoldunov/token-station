@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use ts_core::config::ClaudeConfig;
+use ts_core::config::{ClaudeConfig, MIN_CLAUDE_ENDPOINT_INTERVAL_SECS};
 use ts_core::snapshot::{ProviderState, UsageWindow};
 
 /// Rate-limit backoff and soft-floor bookkeeping for the oauth endpoint.
@@ -19,20 +19,49 @@ pub struct LimitsState {
     pub disabled_message: Option<String>,
     pub last_auth_status_check: Option<i64>,
     pub last_outcome: LastOutcome,
+    /// [`Credentials::plan_fingerprint`] of the sign-in the reading and the
+    /// backoff belong to, once one has been seen.
+    ///
+    /// [`Credentials::plan_fingerprint`]: crate::credentials::Credentials::plan_fingerprint
+    pub plan_fingerprint: Option<String>,
+}
+
+impl LimitsState {
+    /// A clean slate for a sign-in on another plan: nothing the old one was
+    /// told carries over, bar the pacing of `claude auth status`.
+    #[must_use]
+    pub fn for_plan(&self, plan_fingerprint: String) -> LimitsState {
+        LimitsState {
+            last_auth_status_check: self.last_auth_status_check,
+            plan_fingerprint: Some(plan_fingerprint),
+            ..LimitsState::default()
+        }
+    }
+}
+
+/// Whether a reading held for plan `held` belongs to a sign-in on another
+/// plan than `current`. An unknown plan on either side is not a change.
+pub fn plan_changed(held: Option<&str>, current: Option<&str>) -> bool {
+    matches!((held, current), (Some(held), Some(current)) if held != current)
 }
 
 const HARD_FLOOR_SECS: i64 = 30;
-/// First wait after a 429; each consecutive one doubles it, up to the cap.
+/// First wait after a 429 while a reading is on screen; each consecutive one
+/// doubles it, up to the cap. With nothing on screen the first wait is the
+/// endpoint floor instead: see [`backoff_after_rate_limit`].
 const BACKOFF_BASE_SECS: u64 = 600;
 const BACKOFF_CAP_SECS: u64 = 3600;
 /// How long a reading stays good enough that a 429 is not worth a warning: the
 /// daemon retries on its own, and the numbers on screen are still current.
 pub const RATE_LIMIT_GRACE_SECS: i64 = 1800;
 pub const RATE_LIMITED_MESSAGE: &str = "Rate limited by Claude's usage endpoint.";
+/// A 429 with nothing on screen yet: the daemon is waiting, not failing.
+pub const RATE_LIMITED_RETRYING_MESSAGE: &str =
+    "Rate limited by Claude's usage endpoint; retrying automatically.";
 /// Upper bound on a Claude-supplied `Retry-After` in seconds, so a corrupt or
 /// hostile response cannot push `backoff_until` far enough to overflow `i64`
 /// arithmetic (or just wedge the provider for an absurd length of time).
-const MAX_RETRY_AFTER_SECS: i64 = 24 * 3600;
+pub const MAX_RETRY_AFTER_SECS: i64 = 24 * 3600;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
@@ -79,7 +108,7 @@ pub fn decide(state: &mut LimitsState, config: &ClaudeConfig, now: i64, force: b
                 .unwrap_or(i64::MAX)
                 .max(HARD_FLOOR_SECS)
         };
-        if now - last < floor {
+        if now.saturating_sub(last) < floor {
             return Decision::SoftSkip("Refreshed too recently.".to_string());
         }
     }
@@ -93,13 +122,23 @@ pub fn decide(state: &mut LimitsState, config: &ClaudeConfig, now: i64, force: b
 /// a `Retry-After`. The header is a lower bound, not a replacement: a short
 /// one repeated on every 429 would otherwise pin retries to the base cadence
 /// for as long as the endpoint keeps refusing.
+///
+/// `has_window_data` picks the first step. A reading on screen can afford the
+/// ten-minute base; an empty panel cannot, so there the first retry comes at
+/// the endpoint floor and the ladder doubles up from it.
 pub fn backoff_after_rate_limit(
     prior_step_secs: u64,
     retry_after_secs: Option<u64>,
     min_endpoint_interval_secs: u64,
+    has_window_data: bool,
     now: i64,
 ) -> (i64, u64) {
-    let base = min_endpoint_interval_secs.max(BACKOFF_BASE_SECS);
+    let floor = min_endpoint_interval_secs.max(MIN_CLAUDE_ENDPOINT_INTERVAL_SECS);
+    let base = if has_window_data {
+        floor.max(BACKOFF_BASE_SECS)
+    } else {
+        floor
+    };
     let step = if prior_step_secs == 0 {
         base
     } else {
@@ -128,7 +167,9 @@ pub fn next_limits_refresh(
 ) -> Duration {
     let min_interval = i64::try_from(min_endpoint_interval_secs).unwrap_or(i64::MAX);
     let mandatory = [
-        state.backoff_until.map_or(0, |u| (u - now).max(0)),
+        state
+            .backoff_until
+            .map_or(0, |u| u.saturating_sub(now).max(0)),
         state.last_attempt_at.map_or(0, |last| {
             last.saturating_add(min_interval).saturating_sub(now).max(0)
         }),
@@ -268,7 +309,34 @@ pub fn provider_state(inputs: &StateInputs) -> (ProviderState, Option<String>) {
         }
         LastOutcome::Failed(msg) => failed(inputs, msg),
         LastOutcome::RateLimited if inputs.has_recent_endpoint_data => (ProviderState::Ok, None),
-        LastOutcome::RateLimited => failed(inputs, RATE_LIMITED_MESSAGE),
+        LastOutcome::RateLimited if inputs.has_window_data => {
+            (ProviderState::Stale, Some(RATE_LIMITED_MESSAGE.to_string()))
+        }
+        LastOutcome::RateLimited => (
+            ProviderState::Loading,
+            Some(RATE_LIMITED_RETRYING_MESSAGE.to_string()),
+        ),
+    }
+}
+
+/// The last outcome to assume for a reading carried over from an earlier run.
+///
+/// A backoff still running means the endpoint was refusing; a reading inside
+/// the rate-limit grace is as good as a fresh one; anything older is left for
+/// the next refresh to judge, which shows it as stale in the meantime.
+pub fn restored_outcome(
+    backoff_until: Option<i64>,
+    last_endpoint_success_at: Option<i64>,
+    now: i64,
+) -> LastOutcome {
+    if backoff_until.is_some_and(|until| until > now) {
+        LastOutcome::RateLimited
+    } else if last_endpoint_success_at
+        .is_some_and(|t| now.saturating_sub(t) < RATE_LIMIT_GRACE_SECS)
+    {
+        LastOutcome::Ok
+    } else {
+        LastOutcome::None
     }
 }
 
@@ -399,7 +467,7 @@ mod tests {
 
     #[test]
     fn backoff_clamps_huge_retry_after_instead_of_overflowing() {
-        let (until, _) = backoff_after_rate_limit(0, Some(u64::MAX), 180, 1000);
+        let (until, _) = backoff_after_rate_limit(0, Some(u64::MAX), 180, true, 1000);
         assert_eq!(until, 1000 + MAX_RETRY_AFTER_SECS);
     }
 
@@ -407,7 +475,7 @@ mod tests {
     fn backoff_waits_for_the_longer_of_retry_after_and_the_step() {
         // (Retry-After, expected wait): the 600 s first step is the floor.
         for (retry_after, wait) in [(900, 900), (45, 600)] {
-            let (until, step) = backoff_after_rate_limit(0, Some(retry_after), 300, 1000);
+            let (until, step) = backoff_after_rate_limit(0, Some(retry_after), 300, true, 1000);
             assert_eq!(
                 (until, step),
                 (1000 + wait, 600),
@@ -418,40 +486,90 @@ mod tests {
 
     #[test]
     fn backoff_escalates_on_repeated_429s_with_retry_after() {
-        let (_, step1) = backoff_after_rate_limit(0, Some(60), 300, 0);
-        let (until2, step2) = backoff_after_rate_limit(step1, Some(60), 300, 600);
+        let (_, step1) = backoff_after_rate_limit(0, Some(60), 300, true, 0);
+        let (until2, step2) = backoff_after_rate_limit(step1, Some(60), 300, true, 600);
         assert_eq!(step2, 1200);
         assert_eq!(until2, 1800);
     }
 
     #[test]
     fn backoff_exponential_without_retry_after() {
-        let (until1, cur1) = backoff_after_rate_limit(0, None, 300, 0);
+        let (until1, cur1) = backoff_after_rate_limit(0, None, 300, true, 0);
         assert_eq!(cur1, 600); // max(300, 600)
         assert_eq!(until1, 600);
-        let (until2, cur2) = backoff_after_rate_limit(cur1, None, 300, 600);
+        let (until2, cur2) = backoff_after_rate_limit(cur1, None, 300, true, 600);
         assert_eq!(cur2, 1200);
         assert_eq!(until2, 1800);
     }
 
     #[test]
     fn backoff_starts_at_a_configured_floor_above_the_base() {
-        let (until, step) = backoff_after_rate_limit(0, None, 900, 0);
+        let (until, step) = backoff_after_rate_limit(0, None, 900, true, 0);
         assert_eq!((until, step), (900, 900));
     }
 
     #[test]
     fn backoff_caps_at_one_hour() {
-        let (_, cur) = backoff_after_rate_limit(3000, None, 300, 0);
+        let (_, cur) = backoff_after_rate_limit(3000, None, 300, true, 0);
         assert_eq!(cur, 3600);
-        let (_, cur2) = backoff_after_rate_limit(3600, None, 300, 0);
+        let (_, cur2) = backoff_after_rate_limit(3600, None, 300, true, 0);
         assert_eq!(cur2, 3600);
     }
 
     #[test]
     fn backoff_never_shrinks_below_a_configured_floor_above_the_cap() {
-        let (_, step) = backoff_after_rate_limit(7200, None, 7200, 0);
+        let (_, step) = backoff_after_rate_limit(7200, None, 7200, true, 0);
         assert_eq!(step, 7200);
+    }
+
+    #[test]
+    fn backoff_starts_at_the_endpoint_floor_with_nothing_on_screen() {
+        // Nothing to show: the first retry comes at the configured floor, not
+        // at the ten minutes a reading on screen can afford to wait.
+        let (until, step) = backoff_after_rate_limit(0, None, 300, false, 1000);
+        assert_eq!((until, step), (1300, 300));
+    }
+
+    #[test]
+    fn cold_backoff_never_starts_below_the_lowest_allowed_floor() {
+        let (until, step) = backoff_after_rate_limit(0, None, 30, false, 0);
+        assert_eq!((until, step), (120, 120));
+    }
+
+    #[test]
+    fn cold_backoff_still_waits_for_a_longer_retry_after() {
+        let (until, step) = backoff_after_rate_limit(0, Some(900), 300, false, 0);
+        assert_eq!((until, step), (900, 300));
+    }
+
+    #[test]
+    fn cold_backoff_escalates_onto_the_same_ladder() {
+        let (_, first) = backoff_after_rate_limit(0, None, 300, false, 0);
+        let (until, second) = backoff_after_rate_limit(first, None, 300, false, 300);
+        assert_eq!((until, second), (900, 600));
+    }
+
+    #[test]
+    fn a_restored_backoff_still_running_means_rate_limited() {
+        assert_eq!(
+            restored_outcome(Some(2000), Some(1000), 1500),
+            LastOutcome::RateLimited
+        );
+    }
+
+    #[test]
+    fn a_restored_recent_reading_counts_as_ok() {
+        assert_eq!(
+            restored_outcome(Some(1400), Some(1000), 1500),
+            LastOutcome::Ok
+        );
+    }
+
+    #[test]
+    fn a_restored_old_reading_is_left_for_the_next_refresh_to_judge() {
+        let now = 1000 + RATE_LIMIT_GRACE_SECS;
+        assert_eq!(restored_outcome(None, Some(1000), now), LastOutcome::None);
+        assert_eq!(restored_outcome(None, None, now), LastOutcome::None);
     }
 
     #[test]
@@ -645,10 +763,15 @@ mod tests {
     }
 
     #[test]
-    fn state_error_when_rate_limited_with_no_data() {
+    fn state_loading_while_rate_limited_with_no_data() {
+        // Nothing has gone wrong that the daemon will not retry on its own, so
+        // an empty panel reads as waiting rather than as an error.
         assert_eq!(
             provider_state(&rate_limited(false, false)),
-            (ProviderState::Error, Some(RATE_LIMITED_MESSAGE.to_string()))
+            (
+                ProviderState::Loading,
+                Some(RATE_LIMITED_RETRYING_MESSAGE.to_string())
+            )
         );
     }
 }

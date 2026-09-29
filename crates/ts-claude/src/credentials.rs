@@ -61,6 +61,12 @@ impl Credentials {
     pub fn expired(&self, now: i64) -> bool {
         self.expires_at_ms / 1000 <= now + 60
     }
+
+    /// The plan this sign-in is on, as the nearest thing to an account the
+    /// document carries without PII. Two accounts on one plan look the same.
+    pub fn plan_fingerprint(&self) -> String {
+        format!("{}/{}", self.subscription_type, self.rate_limit_tier)
+    }
 }
 
 /// Parse one sign-in document, wherever it came from.

@@ -30,6 +30,12 @@ struct FakeProvider {
     ingested: Mutex<Vec<String>>,
     /// The `now` each ingest was handed, so the drop box's mtime can be asserted.
     observed_at: Mutex<Vec<i64>>,
+    /// What `saved_state` hands the daemon to keep across a restart.
+    saved: Mutex<Option<serde_json::Value>>,
+    /// Every `(saved, now)` the daemon handed back through `restore_state`.
+    restored: Mutex<Vec<(serde_json::Value, i64)>>,
+    /// How many limits refreshes had run by each `restore_state`.
+    refreshes_before_restore: Mutex<Vec<usize>>,
 }
 
 impl FakeProvider {
@@ -41,11 +47,18 @@ impl FakeProvider {
             token_refreshes: AtomicUsize::new(0),
             ingested: Mutex::new(Vec::new()),
             observed_at: Mutex::new(Vec::new()),
+            saved: Mutex::new(None),
+            restored: Mutex::new(Vec::new()),
+            refreshes_before_restore: Mutex::new(Vec::new()),
         })
     }
 
     fn set_percent(&self, percent: f64) {
         *self.percent.lock().unwrap() = percent;
+    }
+
+    fn set_saved(&self, saved: serde_json::Value) {
+        *self.saved.lock().unwrap() = Some(saved);
     }
 }
 
@@ -90,6 +103,18 @@ impl Provider for FakeProvider {
         self.ingested.lock().unwrap().push(text);
         self.observed_at.lock().unwrap().push(now);
         Ok(())
+    }
+
+    fn saved_state(&self) -> Option<serde_json::Value> {
+        self.saved.lock().unwrap().clone()
+    }
+
+    fn restore_state(&self, saved: serde_json::Value, now: i64) {
+        self.restored.lock().unwrap().push((saved, now));
+        self.refreshes_before_restore
+            .lock()
+            .unwrap()
+            .push(self.limits_refreshes.load(Ordering::SeqCst));
     }
 }
 
@@ -277,6 +302,67 @@ async fn the_config_file_is_hot_reloaded() {
     std::fs::write(&h.paths.config_file, "[alerts\n").unwrap();
     h.daemon.reload_config_if_changed().await;
     assert_eq!(h.daemon.config().alerts.warning_percent, 55.0);
+}
+
+#[tokio::test]
+async fn a_limits_refresh_saves_what_the_provider_wants_kept() {
+    let h = harness(10.0);
+    h.claude
+        .set_saved(serde_json::json!({"version": 1, "backoffUntil": NOW + 600}));
+
+    h.daemon.refresh_limits(ProviderId::Claude, false).await;
+
+    let written = std::fs::read_to_string(h.paths.saved_limits(ProviderId::Claude))
+        .expect("claude-limits.json written");
+    let written: serde_json::Value = serde_json::from_str(&written).expect("JSON");
+    assert_eq!(written["backoffUntil"], NOW + 600);
+    // A provider with nothing to keep leaves no file behind.
+    h.daemon.refresh_all(false).await;
+    assert!(!h.paths.saved_limits(ProviderId::Codex).exists());
+}
+
+/// Start a daemon over a saved Claude limits file holding `contents`, and
+/// return what the provider was handed back.
+async fn restored_from(contents: &str) -> Vec<(serde_json::Value, i64)> {
+    let h = harness(10.0);
+    let file = h.paths.saved_limits(ProviderId::Claude);
+    std::fs::create_dir_all(file.parent().expect("a parent")).expect("state dir");
+    std::fs::write(&file, contents).expect("written");
+    h.daemon.restore_saved_limits().await;
+    h.claude.restored.lock().unwrap().clone()
+}
+
+#[tokio::test]
+async fn saved_limits_are_handed_back_on_restart() {
+    assert_eq!(
+        restored_from(r#"{"version":1,"lastAttemptAt":1790596000}"#).await,
+        vec![(
+            serde_json::json!({"version": 1, "lastAttemptAt": 1_790_596_000}),
+            NOW
+        )]
+    );
+}
+
+#[tokio::test]
+async fn unreadable_saved_limits_are_ignored() {
+    assert!(restored_from("{ not json").await.is_empty());
+}
+
+#[tokio::test]
+async fn a_refresh_ahead_of_the_startup_work_restores_first() {
+    let h = harness(10.0);
+    let file = h.paths.saved_limits(ProviderId::Claude);
+    std::fs::create_dir_all(file.parent().expect("a parent")).expect("state dir");
+    std::fs::write(&file, r#"{"version":1,"backoffUntil":1790597400}"#).expect("written");
+
+    // The `Refresh` that activated the daemon, before `startup_work` ran.
+    h.daemon.refresh_all(true).await;
+    h.daemon.refresh_limits(ProviderId::Claude, false).await;
+    h.daemon.restore_saved_limits().await;
+
+    // Handed back once, and before the provider was asked to refresh.
+    assert_eq!(*h.claude.refreshes_before_restore.lock().unwrap(), vec![0]);
+    assert_eq!(h.claude.limits_refreshes.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
