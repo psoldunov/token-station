@@ -11,11 +11,11 @@ struct PerModelDisclosure: View {
     @State private var isExpanded = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: PanelMetrics.rowSpacing) {
+        VStack(alignment: .leading, spacing: 0) {
             Button {
                 // Reduce Motion turns the slide into a plain appearance, which
                 // is what every system disclosure does under that setting.
-                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) {
+                withAnimation(reduceMotion ? nil : .easeOut(duration: PanelMetrics.resizeDuration)) {
                     isExpanded.toggle()
                 }
             } label: {
@@ -36,27 +36,37 @@ struct PerModelDisclosure: View {
             .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
             .accessibilityAddTraits(.isButton)
 
-            if isExpanded {
-                VStack(alignment: .leading, spacing: 3) {
-                    ForEach(rows) { row in
-                        HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            Text(row.model)
-                                .font(.system(size: PanelMetrics.secondarySize))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                            Spacer(minLength: 4)
-                            Text(PanelText.modelDetail(row))
-                                .font(.system(size: PanelMetrics.secondarySize))
-                                .monospacedDigit()
-                                .foregroundStyle(.tertiary)
-                        }
-                        .accessibilityElement(children: .combine)
-                    }
+            // The list stays in the layout and its height is what animates, from
+            // nothing to all of it, clipped from the top. Inserting it with a
+            // transition instead draws it at full height straight away, over the
+            // rows below, while they are still sliding down to make room.
+            list
+                .padding(.top, PanelMetrics.rowSpacing)
+                .frame(height: isExpanded ? nil : 0, alignment: .top)
+                .clipped()
+                .opacity(isExpanded ? 1 : 0)
+                .accessibilityHidden(!isExpanded)
+        }
+    }
+
+    private var list: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            ForEach(rows) { row in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(row.model)
+                        .font(.system(size: PanelMetrics.secondarySize))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 4)
+                    Text(PanelText.modelDetail(row))
+                        .font(.system(size: PanelMetrics.secondarySize))
+                        .monospacedDigit()
+                        .foregroundStyle(.tertiary)
                 }
-                .padding(.leading, 2)
-                .transition(.opacity)
+                .accessibilityElement(children: .combine)
             }
         }
+        .padding(.leading, 2)
     }
 }

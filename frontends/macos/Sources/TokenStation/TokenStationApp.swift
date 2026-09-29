@@ -59,5 +59,6 @@ private struct PanelContainer: View {
             },
             onQuit: { NSApp.terminate(nil) }
         )
+        .sizesWindowToFit()
     }
 }

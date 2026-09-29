@@ -8,7 +8,8 @@ public struct PanelView: View {
     private let onOpenSettings: () -> Void
     private let onQuit: () -> Void
 
-    @State private var contentHeight: CGFloat = 0
+    /// Whether the providers are taller than the panel lets them be.
+    @State private var providersOverflow = false
 
     /// - Parameter isScrollable: `false` draws the whole panel at its natural
     ///   height, which is what `ts-render` needs and what a preview wants.
@@ -118,19 +119,22 @@ public struct PanelView: View {
 
         return Group {
             if isScrollable {
+                // As tall as what it holds, up to the cap, sized in the same
+                // layout pass as its contents. A height measured from inside and
+                // fed back through state lands a pass late, so a row opening or
+                // closing showed a gap or a flashing scroller in the meantime.
                 ScrollView(.vertical) {
                     sections
-                        .background {
-                            GeometryReader { geometry in
-                                Color.clear.preference(
-                                    key: ContentHeightKey.self, value: geometry.size.height)
-                            }
-                        }
+                        .onGeometryChange(for: Bool.self) { geometry in
+                            geometry.size.height > PanelMetrics.maximumContentHeight
+                        } action: { providersOverflow = $0 }
                 }
-                .scrollIndicators(.automatic)
-                .frame(height: min(
-                    max(contentHeight, 1), PanelMetrics.maximumContentHeight))
-                .onPreferenceChange(ContentHeightKey.self) { contentHeight = $0 }
+                // While everything fits there is nothing to scroll, and a
+                // scroller would only flash while the panel changes height.
+                .scrollIndicators(providersOverflow ? .automatic : .never)
+                .scrollDisabled(!providersOverflow)
+                .frame(maxHeight: PanelMetrics.maximumContentHeight)
+                .fixedSize(horizontal: false, vertical: true)
             } else {
                 sections
             }
@@ -148,14 +152,5 @@ public struct PanelView: View {
             MenuRow(title: "Quit Token Station", shortcut: "⌘Q", action: onQuit)
                 .keyboardShortcut("q", modifiers: .command)
         }
-    }
-}
-
-/// Measures the scrolling part so the panel is only as tall as it needs to be.
-private struct ContentHeightKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
     }
 }
