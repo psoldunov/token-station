@@ -1,12 +1,12 @@
 # Token Station
 
-Token Station puts your Claude Code and OpenAI Codex plan usage in the Linux panel. You
-get session and weekly limits, reset countdowns, token counts and API-equivalent cost,
-in a front end that looks like it shipped with your desktop.
+Token Station puts your Claude Code and OpenAI Codex plan usage in the Linux panel and
+the macOS menu bar. You get session and weekly limits, reset countdowns, token counts
+and API-equivalent cost, in a front end that looks like it shipped with your desktop.
 
-| KDE Plasma 6 (system tray applet) | GNOME Shell (top-bar indicator) |
-|---|---|
-| ![Plasma popup](docs/screenshots/plasma-popup-light.png) | ![GNOME menu](docs/screenshots/gnome-menu.png) |
+| KDE Plasma 6 (system tray applet) | GNOME Shell (top-bar indicator) | macOS (menu bar extra) |
+|---|---|---|
+| ![Plasma popup](docs/screenshots/plasma-popup-light.png) | ![GNOME menu](docs/screenshots/gnome-menu.png) | ![macOS panel](docs/screenshots/macos-panel-light.png) |
 
 The tray icon is a small two-bar meter, one bar for Claude Code and one for Codex. Each
 bar fills to the most constrained limit and changes colour when it crosses your warning
@@ -17,23 +17,25 @@ or critical threshold.
 ## How it works
 
 ```
- ~/.claude creds + logs ─┐                                ┌─ Plasma tray applet (QML, Kirigami/PlasmaComponents)
- api.anthropic.com ──────┤                                │
- statusline collector ───┼─> token-station daemon ─D-Bus──┼─ GNOME Shell extension (GJS/St, libadwaita prefs)
- codex app-server ───────┤   (Rust)                       │
- codex rollouts ─────────┘                                └─ token-station tray (StatusNotifierItem, other desktops)
+ ~/.claude creds + logs ─┐                                  ┌─ Plasma tray applet (QML, Kirigami/PlasmaComponents)
+ api.anthropic.com ──────┤                                  │
+ statusline collector ───┼─> token-station daemon ─D-Bus────┼─ GNOME Shell extension (GJS/St, libadwaita prefs)
+ codex app-server ───────┤   (Rust)                         │
+ codex rollouts ─────────┘         │                        └─ token-station tray (StatusNotifierItem, other desktops)
+                                   └─Unix socket (macOS)────── Token Station.app (SwiftUI menu bar extra)
 ```
 
 A small Rust daemon is the only process that touches credentials, the network or log
 files. It publishes one JSON snapshot on the session bus
-(`dev.soldunov.TokenStation`, see [docs/dbus-api.md](docs/dbus-api.md)), and the desktop
-front ends only render it. [docs/architecture.md](docs/architecture.md) has the details.
+(`dev.soldunov.TokenStation`, see [docs/dbus-api.md](docs/dbus-api.md)), or on macOS
+over a Unix socket ([docs/socket-api.md](docs/socket-api.md)), and the front ends only
+render it. [docs/architecture.md](docs/architecture.md) has the details.
 
 ### Claude Code
 
 Plan limits come from the endpoint behind Claude Code's own `/usage` command, called with
-the CLI's sign-in. Token Station only reads that token. It never refreshes, writes or
-logs it. If you turn on the optional statusline collector, Claude Code also sends its
+the CLI's sign-in (on macOS, the one Claude Code keeps in your login Keychain). Token
+Station only reads that token. It never refreshes, writes or logs it. If you turn on the optional statusline collector, Claude Code also sends its
 official `rate_limits` statusline data straight to the daemon while it runs. Token counts
 and cost come from the local transcripts in `~/.claude/projects`.
 
@@ -119,11 +121,47 @@ The flags you are most likely to want are `--dry-run`, `--desktop kde|gnome|othe
 Code statusline, and refuses if the settings file is managed by Nix. `--force` replaces
 existing files that `setup` did not create, but it still never touches Nix-managed ones.
 
+### macOS
+
+Download `TokenStation-macOS.zip` from the releases page, unzip it and drag
+**Token Station** into Applications. The app is not notarized, so macOS refuses the
+first launch. Either click **Open Anyway** in System Settings → Privacy & Security
+after that first attempt, or clear the quarantine flag once:
+
+```sh
+xattr -dr com.apple.quarantine "/Applications/Token Station.app"
+```
+
+Token Station lives in the menu bar and has no Dock icon. The app runs its own copy of
+the daemon and stops it when you quit. **Open at Login** is in its Settings (⌘,).
+Alerts arrive through Notification Center, and System Settings → Notifications →
+Token Station controls how they look.
+
+To build the app yourself you need Rust and Xcode. There is no Xcode project: a Swift
+package and a script build the bundle. Xcode is still needed because SwiftUI's macros
+ship only with it, and the script finds it through `xcode-select` or `DEVELOPER_DIR`:
+
+```sh
+frontends/macos/scripts/build-app.sh                    # frontends/macos/build/Token Station.app
+frontends/macos/scripts/build-app.sh --universal --zip  # Apple silicon + Intel, zipped
+```
+
+The CLI ships inside the bundle. Link it into your `PATH` if you want it there:
+
+```sh
+ln -s "/Applications/Token Station.app/Contents/MacOS/token-station" ~/.local/bin/token-station
+```
+
+`setup`, `uninstall` and `tray` are Linux-only. To feed Claude Code's statusline to the
+app, point `statusLine.command` in `~/.claude/settings.json` at
+`token-station statusline` yourself, with `--wrap` for the statusline you already have.
+
 ## Requirements
 
 - KDE Plasma 6.4 or newer, or GNOME Shell 46 to 50. Other desktops need a
   StatusNotifierItem host. On GNOME, only the tray fallback needs the AppIndicator
   extension; the native extension works without it.
+- macOS 14 Sonoma or newer, on Apple silicon or Intel.
 - For Claude Code plan limits, Claude Code signed in with a Pro or Max subscription.
   API-key users still get local token counts and cost.
 - For Codex plan limits, the Codex CLI signed in with ChatGPT (`codex login`).
@@ -135,14 +173,16 @@ token-station status [--json]     one-shot report (uses the daemon if it runs)
 token-station refresh             ask the daemon to refresh now
 token-station daemon [--fixture FILE] [--config FILE]
 token-station statusline [--wrap CMD]   Claude Code statusLine collector
-token-station tray                StatusNotifierItem icon for other desktops
-token-station setup | uninstall   AppImage desktop integration
+token-station tray                StatusNotifierItem icon for other desktops (Linux)
+token-station setup | uninstall   AppImage desktop integration (Linux)
 ```
 
 ## Configuration
 
-Settings live in `$XDG_CONFIG_HOME/token-station/config.toml`. Every key is optional. The
-applet and extension settings pages edit the same file through the daemon.
+Settings live in `$XDG_CONFIG_HOME/token-station/config.toml`, or on macOS in
+`~/Library/Application Support/dev.soldunov.TokenStation/config.toml`. Every key is
+optional. The applet, extension and app settings pages edit the same file through the
+daemon.
 
 ```toml
 [general]
@@ -199,6 +239,15 @@ nix build .#appimage                          # static musl AppImage
 
 Fixture mode serves `data/fixtures/*.json` with live countdowns, synthetic history and
 in-memory settings, so you can work on the front ends without real accounts.
+
+On macOS, the daemon's own tests run with plain `cargo test --workspace`, and the app's
+build, tests, SwiftLint, Periphery and offscreen renders are described in
+[frontends/macos/README.md](frontends/macos/README.md):
+
+```sh
+cargo run -p token-station -- daemon --fixture data/fixtures/snapshot-near-limit.json &
+cd frontends/macos && swift test && swift run TokenStation   # connects to that daemon
+```
 
 ## License
 
