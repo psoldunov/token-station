@@ -7,29 +7,58 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   # Nothing is published before the same gate CI uses has passed on the tag.
   check:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          filter='.packages[] | select(.name == "token-station") | .version'
+          version="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r "$filter")"
+          test "$GITHUB_REF_NAME" = "v$version"
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/master
+
+          endpoint="repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME"
+          response="$(gh api --include "$endpoint" 2>&1)" || :
+          status="$(sed -nE \
+            's#^HTTP/[0-9.]+ ([0-9]{3}).*#\1#p' <<< "$response" | head -1)"
+          case "$status" in
+            200) test "$(gh api "$endpoint" --jq .draft)" = true ;;
+            404) ;;
+            *) printf '%s\n' "$response" >&2; exit 1 ;;
+          esac
 
       # The GNOME VM check boots a NixOS guest and needs /dev/kvm.
       - name: Enable KVM
         shell: bash
         run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666",' \
+            'OPTIONS+="static_node=kvm"' \
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      - uses: cachix/install-nix-action@v31
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
         with:
           extra_nix_config: |
             system-features = nixos-test benchmark big-parallel kvm
 
       # CI on master already built and pushed this commit's checks.
-      - uses: cachix/cachix-action@v17
+      - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866
         with:
           name: psoldunov
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
@@ -38,7 +67,9 @@ jobs:
         run: nix flake check -L --keep-going
 
       - name: cargo deny check advisories
-        run: nix shell --inputs-from . nixpkgs#cargo nixpkgs#cargo-deny -c cargo deny --locked check advisories
+        run: >-
+          nix shell --inputs-from . nixpkgs#cargo nixpkgs#cargo-deny
+          -c cargo deny --locked check advisories
 
   build:
     needs: check
@@ -51,9 +82,11 @@ jobs:
             arch: aarch64
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: cachix/install-nix-action@v31
-      - uses: cachix/cachix-action@v17
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
+      - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866
         with:
           name: psoldunov
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
@@ -62,40 +95,113 @@ jobs:
       - name: Smoke-test AppImage on a non-Nix system
         shell: bash
         run: |
-          ./result/TokenStation-${{ matrix.arch }}.AppImage --appimage-extract-and-run --version
-          ./result/TokenStation-${{ matrix.arch }}.AppImage --appimage-extract-and-run status --json > status.json
+          appimage="./result/TokenStation-${{ matrix.arch }}.AppImage"
+          "$appimage" --appimage-extract-and-run --version
+          "$appimage" --appimage-extract-and-run status --json > status.json
           head -c 400 status.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: TokenStation-${{ matrix.arch }}.AppImage
           path: result/TokenStation-${{ matrix.arch }}.AppImage
           if-no-files-found: error
 
-  # Universal (Apple silicon + Intel) app, ad-hoc signed: there is no Developer ID
-  # to sign or notarize with yet, so the README explains the first launch.
+  # Universal (Apple silicon + Intel), Developer ID signed and notarized.
   macos:
     needs: check
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
       - name: Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal --component clippy
           rustup default stable
           rustup target add aarch64-apple-darwin x86_64-apple-darwin
-      - name: cargo clippy
-        run: cargo clippy --workspace --all-targets --locked -- --deny warnings
+      - name: Install SwiftLint and Periphery
+        run: brew install swiftlint periphery
+      - name: lint
+        run: .ensemblr/scripts/macos.sh lint
       - name: cargo test
         run: cargo test --workspace --locked
       - name: swift test
         working-directory: frontends/macos
         run: swift test
       - name: Build Token Station.app
-        run: frontends/macos/scripts/build-app.sh --universal --zip
-      - uses: actions/upload-artifact@v4
+        run: frontends/macos/scripts/build-app.sh --universal
+      - uses: "apple-actions/import-codesign-certs@\
+          5142e029c445c10ffc7149d172e540235a065466"
         with:
-          name: TokenStation-macOS.zip
-          path: frontends/macos/build/TokenStation-macOS.zip
+          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      - name: Sign and archive Token Station.app
+        env:
+          CODESIGN_IDENTITY: >-
+            Developer ID Application: Philipp Soldunov (MSU5X4VMMP)
+        shell: bash
+        run: |
+          app="frontends/macos/build/Token Station.app"
+          zip="frontends/macos/build/TokenStation-macOS.zip"
+          codesign --force --timestamp --options runtime \
+            --sign "$CODESIGN_IDENTITY" "$app/Contents/MacOS/token-station"
+          codesign --force --timestamp --options runtime \
+            --sign "$CODESIGN_IDENTITY" "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          ditto -c -k --keepParent "$app" "$zip"
+      - name: Notarize and package macOS artifacts
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="frontends/macos/build/Token Station.app"
+          zip="frontends/macos/build/TokenStation-macOS.zip"
+          dmg="frontends/macos/build/TokenStation-macOS.dmg"
+          api_key="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+          staging="$RUNNER_TEMP/token-station-dmg"
+          extracted="$RUNNER_TEMP/token-station-zip"
+          trap 'rm -rf "$api_key" "$staging" "$extracted"' EXIT
+
+          printf '%s' "$APPLE_API_KEY" > "$api_key"
+          chmod 600 "$api_key"
+          notary=(
+            --key "$api_key"
+            --key-id "$APPLE_API_KEY_ID"
+            --issuer "$APPLE_API_ISSUER"
+          )
+
+          xcrun notarytool submit "$zip" "${notary[@]}" --wait
+          xcrun stapler staple "$app"
+          xcrun stapler validate "$app"
+
+          rm "$zip"
+          ditto -c -k --keepParent "$app" "$zip"
+
+          mkdir "$staging"
+          ditto "$app" "$staging/Token Station.app"
+          ln -s /Applications "$staging/Applications"
+          hdiutil create -volname "Token Station" -srcfolder "$staging" \
+            -ov -format UDZO "$dmg"
+          xcrun notarytool submit "$dmg" "${notary[@]}" --wait
+          xcrun stapler staple "$dmg"
+          xcrun stapler validate "$dmg"
+
+          codesign --verify --deep --strict --verbose=2 "$app"
+          spctl --assess --type execute --verbose=4 "$app"
+          mkdir "$extracted"
+          ditto -x -k "$zip" "$extracted"
+          extracted_app="$extracted/Token Station.app"
+          codesign --verify --deep --strict --verbose=2 "$extracted_app"
+          xcrun stapler validate "$extracted_app"
+          spctl --assess --type execute --verbose=4 "$extracted_app"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: TokenStation-macOS
+          path: |
+            frontends/macos/build/TokenStation-macOS.dmg
+            frontends/macos/build/TokenStation-macOS.zip
           if-no-files-found: error
 
   # One job creates the release, so the builds cannot race each other.
@@ -105,14 +211,36 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           path: artifacts
           pattern: TokenStation-*
           merge-multiple: true
-      - uses: softprops/action-gh-release@v2
+      - name: Check release is still unpublished
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          endpoint="repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME"
+          response="$(gh api --include "$endpoint" 2>&1)" || :
+          status="$(sed -nE \
+            's#^HTTP/[0-9.]+ ([0-9]{3}).*#\1#p' <<< "$response" | head -1)"
+          case "$status" in
+            200) test "$(gh api "$endpoint" --jq .draft)" = true ;;
+            404) ;;
+            *) printf '%s\n' "$response" >&2; exit 1 ;;
+          esac
+      - uses: "softprops/action-gh-release@\
+          3bb12739c298aeb8a4eeaf626c5b8d85266b0e65"
         with:
           files: |
             artifacts/TokenStation-*.AppImage
+            artifacts/TokenStation-macOS.dmg
             artifacts/TokenStation-macOS.zip
+          draft: true
           fail_on_unmatched_files: true
+          generate_release_notes: true
+      - name: Publish complete release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false --latest

@@ -51,6 +51,19 @@ version from the Cargo workspace, and signs the helper before the bundle.
 missing. `--zip` always writes `build/TokenStation-macOS.zip`; the name carries
 no version because CI and the release job upload exactly that path.
 
+Local builds use an ad-hoc signature unless `CODESIGN_IDENTITY` names an
+installed Developer ID Application certificate. On a `v*` tag, the release
+workflow builds the universal app, imports that certificate, then signs and
+notarizes it with App Store Connect API credentials. It staples the ticket and
+publishes both `TokenStation-macOS.dmg` and `TokenStation-macOS.zip`. The zip
+is recreated after stapling the app; zip archives cannot themselves be stapled.
+
+The workflow reads five repository secrets: `APPLE_CERTIFICATE_BASE64` (the
+Developer ID certificate and private key exported as a base64-encoded `.p12`),
+`APPLE_CERTIFICATE_PASSWORD`, and the raw PEM `APPLE_API_KEY` plus its
+`APPLE_API_KEY_ID` and team `APPLE_API_ISSUER`. The `.p12` must contain a
+Developer ID Application certificate, not a development or installer identity.
+
 ## Checks
 
 ```sh

@@ -54,13 +54,17 @@ undocumented, and explains what happens when one fails.
 ### Nix flake (home-manager)
 
 ```nix
-# flake.nix inputs
-token-station.url = "github:psoldunov/token-station";
+# flake.nix inputs: immutable release by default
+token-station.url = "github:psoldunov/token-station/v0.1.0";
+
+# Optional moving channel, updated whenever your flake.lock is updated.
+token-station-master.url = "github:psoldunov/token-station/master";
 
 # home-manager configuration
 imports = [ inputs.token-station.homeManagerModules.default ];
 programs.token-station = {
   enable = true;
+  # package = inputs.token-station-master.packages.${pkgs.system}.master;
   # gnome.enable = true;                  # enable the Shell extension via dconf
   # claudeStatusline = {                  # optional: live limits from Claude Code's statusline
   #   enable = true;
@@ -68,6 +72,15 @@ programs.token-station = {
   # };
   # settings.alerts.warning_percent = 75; # makes config.toml read-only (Nix-managed)
 };
+```
+
+The release input stays on `v0.1.0`. The optional master input resolves the latest
+commit on `master` when you add or update it in your lock file and exposes the same
+build as `packages.${system}.master`. Without a lock file, try either channel directly:
+
+```sh
+nix run github:psoldunov/token-station/v0.1.0 -- status
+nix run github:psoldunov/token-station/master#master -- status
 ```
 
 This installs the daemon as a supervised `systemd --user` service (also D-Bus
@@ -79,9 +92,8 @@ and log in again.
 The flake also has a NixOS module (`nixosModules.default`) and an overlay
 (`overlays.default`). Neither tells a running plasmashell about the applet, so after
 installing through them, log out and back in (or run
-`systemctl --user restart plasma-plasmashell`) before looking for it in the tray. To
-try it without installing anything, run
-`nix run github:psoldunov/token-station -- status`.
+`systemctl --user restart plasma-plasmashell`) before looking for it in the tray.
+To try it without installing anything, use one of the release or master commands above.
 
 If you install the package on its own, say with `nix profile install` or through the
 overlay, you get the systemd user unit (`share/systemd/user/token-station.service`) and
@@ -97,7 +109,9 @@ The home-manager and NixOS modules, and the AppImage's `setup`, take care of thi
 
 ### AppImage
 
-Download `TokenStation-x86_64.AppImage` from the releases page, then:
+Download the AppImage for your machine from the releases page:
+`TokenStation-x86_64.AppImage` for Intel/AMD or
+`TokenStation-aarch64.AppImage` for ARM. For example:
 
 ```sh
 chmod +x TokenStation-x86_64.AppImage
@@ -123,14 +137,10 @@ existing files that `setup` did not create, but it still never touches Nix-manag
 
 ### macOS
 
-Download `TokenStation-macOS.zip` from the releases page, unzip it and drag
-**Token Station** into Applications. The app is not notarized, so macOS refuses the
-first launch. Either click **Open Anyway** in System Settings → Privacy & Security
-after that first attempt, or clear the quarantine flag once:
-
-```sh
-xattr -dr com.apple.quarantine "/Applications/Token Station.app"
-```
+Download `TokenStation-macOS.dmg` from the releases page, open it and drag
+**Token Station** into Applications. `TokenStation-macOS.zip` contains the same
+universal app for users who prefer an archive. Both are Developer ID signed and
+notarized by Apple.
 
 Token Station lives in the menu bar and has no Dock icon. The app runs its own copy of
 the daemon and stops it when you quit. **Open at Login** is in its Settings (⌘,).

@@ -64,6 +64,9 @@
         {
           default = token-station;
           inherit token-station;
+          # A named target for callers following the moving master ref:
+          # `github:psoldunov/token-station/master#master`.
+          master = token-station;
           daemon = native.daemon.package;
           daemon-static = static.daemon.package;
           inherit (native.frontends) plasmoid gnome-extension;
