@@ -10,7 +10,7 @@ import QtQuick
 import QtQuick.Layouts
 
 import org.kde.plasma.core as PlasmaCore
-import org.kde.plasma.components as PlasmaComponents3
+import org.kde.plasma.workspace.components as WorkspaceComponents
 import org.kde.kirigami as Kirigami
 
 import "Formatters.js" as Formatters
@@ -20,7 +20,7 @@ MouseArea {
 
     /*! Parsed daemon snapshot, or null while nothing has arrived. */
     property var snapshot: null
-    /*! Draw the worst bar's percentage next to the meter. */
+    /*! Badge the worst bar's percentage below the meter, as the battery applet does. */
     property bool showPercentText: false
     /*! Mirrors PlasmoidItem.expanded so the popup toggles instead of re-opening. */
     property bool expandedState: false
@@ -34,15 +34,20 @@ MouseArea {
     readonly property var bars: snapshot && snapshot.meter && snapshot.meter.bars ? snapshot.meter.bars : []
     readonly property bool isVertical: formFactor === PlasmaCore.Types.Vertical
 
-    // The panel fixes one axis; derive the meter from that axis only, never from
-    // the axis this item asks the panel for, or the size binding would loop.
-    readonly property int thickness: Math.max(Kirigami.Units.iconSizes.small, isVertical ? root.width : root.height)
-    readonly property int gaugeHeight: Math.max(Kirigami.Units.iconSizes.small,
-                                                Math.min(Kirigami.Units.iconSizes.medium, Math.round(thickness * 0.8)))
+    // Size the meter the way Kirigami.Icon sizes the tray's other icons: the
+    // largest standard icon size that fits the shorter side. The system tray
+    // fixes both sides of its cell, and the long one is the panel's thickness,
+    // so sizing from it alone draws a meter taller than its neighbours. A bare
+    // panel fixes one side and this item copies it to the other, so neither
+    // binding loops.
+    readonly property int iconSize: Kirigami.Units.iconSizes.roundedIconSize(
+        Math.max(Kirigami.Units.iconSizes.small, Math.min(root.width, root.height)))
+    // Leave a margin inside the box, as an icon's glyph does inside its canvas.
+    readonly property int gaugeHeight: Math.round(iconSize * 0.75)
     readonly property int barWidth: Math.max(3, Math.round(gaugeHeight / 4))
     readonly property int barSpacing: Math.max(2, Math.round(gaugeHeight / 6))
 
-    /*! Highest percentage across the bars; what the optional percent text shows. */
+    /*! Highest percentage across the bars; what the optional badge shows. */
     readonly property var worstPercent: {
         let worst = null;
         for (const bar of root.bars) {
@@ -71,13 +76,15 @@ MouseArea {
     Accessible.name: root.accessibleName
     Accessible.description: root.accessibleDescription
 
-    Layout.minimumWidth: root.isVertical ? Kirigami.Units.iconSizes.small : content.implicitWidth
-    Layout.minimumHeight: root.isVertical ? content.implicitHeight : Kirigami.Units.iconSizes.small
-    Layout.preferredWidth: root.isVertical ? -1 : content.implicitWidth
-    Layout.preferredHeight: root.isVertical ? content.implicitHeight : -1
+    // Square in a bare panel, like any icon applet. The system tray ignores these
+    // and hands every item the same cell.
+    Layout.minimumWidth: Kirigami.Units.iconSizes.small
+    Layout.minimumHeight: Kirigami.Units.iconSizes.small
+    Layout.preferredWidth: root.isVertical ? -1 : root.height
+    Layout.preferredHeight: root.isVertical ? root.width : -1
 
-    implicitWidth: content.implicitWidth
-    implicitHeight: content.implicitHeight
+    implicitWidth: Kirigami.Units.iconSizes.smallMedium
+    implicitHeight: Kirigami.Units.iconSizes.smallMedium
 
     // A click while the popup is open first dismisses it, so the state at press
     // time is the one to invert.
@@ -91,18 +98,17 @@ MouseArea {
         }
     }
 
-    Grid {
-        id: content
+    Item {
+        id: meterBox
 
         anchors.centerIn: parent
-        columns: root.isVertical ? 1 : 2
-        spacing: percentLabel.visible ? Kirigami.Units.smallSpacing : 0
-        horizontalItemAlignment: Grid.AlignHCenter
-        verticalItemAlignment: Grid.AlignVCenter
+        width: root.iconSize
+        height: root.iconSize
 
         Row {
             id: gauge
 
+            anchors.centerIn: parent
             spacing: root.barSpacing
             height: root.gaugeHeight
 
@@ -153,16 +159,33 @@ MouseArea {
                 }
             }
         }
+    }
 
-        PlasmaComponents3.Label {
-            id: percentLabel
+    // The tray gives every item a fixed cell, so text beside the meter would
+    // spill over the neighbouring icons. Badge it the way the battery applet
+    // badges its charge instead.
+    WorkspaceComponents.BadgeOverlay {
+        id: badge
 
-            visible: root.showPercentText && root.worstPercent !== null
-            text: root.worstPercent !== null ? Formatters.percent(root.worstPercent) : ""
-            color: root.levelColor(root.snapshot && root.snapshot.meter ? root.snapshot.meter.level : "normal")
-            font: Kirigami.Theme.smallFont
-            verticalAlignment: Text.AlignVCenter
-            horizontalAlignment: Text.AlignHCenter
-        }
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+
+        visible: root.showPercentText && root.worstPercent !== null
+        text: root.worstPercent !== null ? Formatters.percent(root.worstPercent) : ""
+        // Plasma 6.4 and 6.5 scale the badge font from this and 6.6 keeps the
+        // badge inside it; 6.7 ignores it.
+        icon: meterBox
+
+        // Centre it when it is wider than the cell, as the battery badge does.
+        states: [
+            State {
+                when: badge.width >= root.width
+                AnchorChanges {
+                    target: badge
+                    anchors.right: undefined
+                    anchors.horizontalCenter: parent.horizontalCenter
+                }
+            }
+        ]
     }
 }

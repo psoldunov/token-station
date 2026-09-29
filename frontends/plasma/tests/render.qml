@@ -102,6 +102,8 @@ Item {
             const name = String(path).split("/").pop().replace(/\.json$/, "");
             const snapshot = harness.shiftTimestamps(JSON.parse(harness.readFile(path)));
             jobs.push({ "name": name, "view": "full", "snapshot": snapshot, "daemonRunning": true, "percentText": false });
+            // As the system tray shows it: the tray draws the heading itself.
+            jobs.push({ "name": name, "view": "full-tray", "snapshot": snapshot, "daemonRunning": true, "percentText": false });
             jobs.push({ "name": name, "view": "compact", "snapshot": snapshot, "daemonRunning": true, "percentText": false });
             jobs.push({ "name": name, "view": "compact-percent", "snapshot": snapshot, "daemonRunning": true, "percentText": true });
             // The per-model list starts collapsed in the popup, so render it on
@@ -124,7 +126,8 @@ Item {
         const job = harness.queue[harness.queueIndex];
         harness.queueIndex += 1;
 
-        const componentPath = job.view === "full" ? "FullRepresentation.qml"
+        const isFull = job.view === "full" || job.view === "full-tray";
+        const componentPath = isFull ? "FullRepresentation.qml"
                             : job.view === "models" ? "ModelBreakdown.qml"
                             : "CompactRepresentation.qml";
         const component = Qt.createComponent(harness.uiDir + "/" + componentPath, Component.PreferSynchronous);
@@ -140,10 +143,11 @@ Item {
                 "showModels": true,
                 "width": 320
             }
-            : job.view === "full"
+            : isFull
             ? {
                 "snapshot": job.snapshot,
                 "daemonRunning": job.daemonRunning,
+                "containmentDrawsHeading": job.view === "full-tray",
                 "now": Math.floor(Date.now() / 1000),
                 "width": 360,
                 "height": 620
@@ -151,8 +155,10 @@ Item {
             : {
                 "snapshot": job.snapshot,
                 "showPercentText": job.percentText,
-                "width": job.percentText ? 64 : 32,
-                "height": 32
+                // Roughly the cell the system tray gives each item on a default
+                // panel: one small icon wide, the panel's thickness tall.
+                "width": Kirigami.Units.iconSizes.smallMedium,
+                "height": 40
             };
 
         // The real popup gets its background from the Plasma dialog; paint the
@@ -166,7 +172,7 @@ Item {
             return;
         }
 
-        if (job.view === "full" && job.snapshot) {
+        if (isFull && job.snapshot) {
             // Feed the sparklines without a bus.
             item.historyRequested.connect((provider, windowId, since, callback) => {
                 callback(harness.fakeHistory(Math.floor(Date.now() / 1000) - since, windowId.length), "");
