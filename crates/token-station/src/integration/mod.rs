@@ -601,6 +601,7 @@ mod tests {
     fn env_for(root: &Path) -> Env {
         let at = |suffix: &str| Some(root.join(suffix).to_string_lossy().into_owned());
         Env {
+            socket: None,
             home: at("home"),
             config_home: at("config"),
             state_home: at("state"),

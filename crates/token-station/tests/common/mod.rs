@@ -1,3 +1,4 @@
+#![cfg(not(target_os = "macos"))]
 //! A private session bus for the D-Bus integration tests.
 
 use std::io::{BufRead, BufReader};

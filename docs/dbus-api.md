@@ -2,7 +2,9 @@
 
 The daemon (`token-station daemon`) owns the session-bus name `dev.soldunov.TokenStation`
 and exports one object. The front ends (Plasma applet, GNOME extension, SNI tray, CLI)
-talk to the daemon only through this interface.
+talk to the daemon only through this interface. macOS has no session bus; there the
+daemon serves the same methods over a Unix socket, described in
+[socket-api.md](socket-api.md).
 
 - Bus name: `dev.soldunov.TokenStation`
 - Object path: `/dev/soldunov/TokenStation`

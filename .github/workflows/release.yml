@@ -61,9 +61,36 @@ jobs:
           path: result/TokenStation-${{ matrix.arch }}.AppImage
           if-no-files-found: error
 
-  # One job creates the release, so the two builds cannot race each other.
+  # Universal (Apple silicon + Intel) app, ad-hoc signed: there is no Developer ID
+  # to sign or notarize with yet, so the README explains the first launch.
+  macos:
+    needs: check
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- --deny warnings
+      - name: cargo test
+        run: cargo test --workspace --locked
+      - name: swift test
+        working-directory: frontends/macos
+        run: swift test
+      - name: Build Token Station.app
+        run: frontends/macos/scripts/build-app.sh --universal --zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TokenStation-macOS.zip
+          path: frontends/macos/build/TokenStation-macOS.zip
+          if-no-files-found: error
+
+  # One job creates the release, so the builds cannot race each other.
   release:
-    needs: build
+    needs: [build, macos]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -71,9 +98,11 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-          pattern: TokenStation-*.AppImage
+          pattern: TokenStation-*
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/TokenStation-*.AppImage
+          files: |
+            artifacts/TokenStation-*.AppImage
+            artifacts/TokenStation-macOS.zip
           fail_on_unmatched_files: true

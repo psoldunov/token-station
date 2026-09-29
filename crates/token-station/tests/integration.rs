@@ -1,3 +1,6 @@
+#![cfg(not(target_os = "macos"))]
+//! Linux only: the session bus, the tray and the desktop integration.
+
 //! `setup` and `uninstall` round trips in a throwaway home.
 //!
 //! Every run works on temp XDG directories and a `PATH` holding only recording
@@ -37,6 +40,7 @@ impl Home {
     fn env(&self) -> Env {
         let at = |suffix: &str| Some(self.dir.path().join(suffix).to_string_lossy().into_owned());
         Env {
+            socket: None,
             home: at("home"),
             config_home: at("config"),
             state_home: at("state"),

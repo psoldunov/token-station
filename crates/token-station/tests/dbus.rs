@@ -1,3 +1,6 @@
+#![cfg(not(target_os = "macos"))]
+//! Linux only: the session bus, the tray and the desktop integration.
+
 //! End-to-end checks of `dev.soldunov.TokenStation1` on a private session bus.
 
 mod common;
@@ -88,7 +91,9 @@ async fn serve(
     service::serve(&connection, Arc::clone(&publisher), backend)
         .await
         .expect("object served");
-    publisher.attach(connection.clone());
+    publisher.attach(std::sync::Arc::new(
+        token_station::dbus::sink::PropertiesSink::new(connection.clone()),
+    ));
     let reply = connection
         .request_name_with_flags(BUS_NAME, RequestNameFlags::DoNotQueue.into())
         .await

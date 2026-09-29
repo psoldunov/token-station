@@ -1,8 +1,10 @@
 //! The binary's own behaviour: statusline fallback, wrapping and exit codes.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+
+use token_station::paths::{Env, Paths};
 
 const SAMPLE: &str = r#"{"model":{"display_name":"Opus 5.5"},"rate_limits":{"five_hour":{"used_percentage":34},"seven_day":{"used_percentage":15}}}"#;
 
@@ -14,6 +16,24 @@ fn binary() -> PathBuf {
 struct Run {
     stdout: String,
     code: i32,
+}
+
+/// Where a run rooted at `home` keeps its files.
+///
+/// Asked rather than spelled out, because the layout is the platform's: Linux
+/// follows the XDG variables below and macOS ignores them for the Apple
+/// directories under `~/Library`.
+fn paths_for(home: &Path) -> Paths {
+    let at = |suffix: &str| Some(home.join(suffix).to_string_lossy().into_owned());
+    Paths::resolve(&Env {
+        home: Some(home.to_string_lossy().into_owned()),
+        config_home: at("config"),
+        state_home: at("state"),
+        cache_home: at("cache"),
+        runtime_dir: at("run"),
+        data_home: at("data"),
+        socket: None,
+    })
 }
 
 /// Run the binary with an isolated environment and no session bus.
@@ -63,7 +83,7 @@ fn statusline_prints_a_compact_line_and_drops_the_payload() {
     assert_eq!(out.code, 0);
     assert_eq!(out.stdout.trim(), "5h 34% · 7d 15%");
 
-    let dropped = dir.path().join("run/token-station/claude-statusline.json");
+    let dropped = paths_for(dir.path()).statusline_drop();
     assert_eq!(std::fs::read_to_string(dropped).unwrap(), SAMPLE);
 }
 
@@ -143,11 +163,19 @@ fn no_subcommand_outside_an_appimage_prints_the_help() {
         "{}",
         out.stdout
     );
-    assert!(out.stdout.contains("setup"), "{}", out.stdout);
+    // `setup` is Linux's; macOS installs an app bundle instead.
+    assert_eq!(
+        out.stdout.contains("setup"),
+        cfg!(not(target_os = "macos")),
+        "{}",
+        out.stdout
+    );
     // Printing help installs nothing.
-    assert!(!dir.path().join("state/token-station").exists());
+    assert!(!paths_for(dir.path()).state_dir.exists());
 }
 
+/// The desktop integration is Linux's alone.
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn no_subcommand_inside_an_appimage_runs_setup() {
     let dir = tempfile::tempdir().unwrap();
@@ -194,6 +222,8 @@ fn no_subcommand_inside_an_appimage_runs_setup() {
     );
 }
 
+/// The desktop integration is Linux's alone.
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn a_dry_run_prints_the_plan_and_writes_nothing() {
     let dir = tempfile::tempdir().unwrap();
@@ -214,6 +244,8 @@ fn a_dry_run_prints_the_plan_and_writes_nothing() {
     assert!(!dir.path().join("config").exists());
 }
 
+/// The desktop integration is Linux's alone.
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn setup_for_kde_without_a_payload_fails_clearly() {
     let dir = tempfile::tempdir().unwrap();
@@ -236,7 +268,7 @@ fn refresh_without_a_daemon_fails_cleanly() {
 #[test]
 fn status_without_a_daemon_still_answers() {
     let dir = tempfile::tempdir().unwrap();
-    let config = dir.path().join("config/token-station/config.toml");
+    let config = paths_for(dir.path()).config_file;
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
     // Both providers off, so the command touches no credentials and no network.
     std::fs::write(

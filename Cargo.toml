@@ -31,6 +31,9 @@ ksni = "0.3"
 libc = "0.2"
 # rustls with the ring provider (no aws-lc, no OpenSSL) so the daemon links as a static musl binary.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots"] }
+# SHA-256 for the macOS Keychain service name. Already in the tree under
+# rustls, so this adds no dependency of its own.
+ring = "0.17"
 notify-rust = { version = "4", default-features = false, features = ["z"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 schemars = "1"

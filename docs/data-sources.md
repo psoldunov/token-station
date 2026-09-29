@@ -27,9 +27,18 @@ to the keyed windows, so new codenamed keys don't break it.
   The file is read on every poll and is never written, refreshed or logged. The token
   needs the `user:profile` scope; a 403 turns the endpoint off for the rest of the
   session.
+- On macOS, Claude Code keeps the same JSON in the login Keychain instead: a generic
+  password with service `Claude Code-credentials` and your user name as the account. With
+  a custom config directory (`CLAUDE_CONFIG_DIR`, or `claude.config_dir` in Token
+  Station's config) the service gets a suffix, `-` plus the first 8 hex digits of the
+  SHA-256 of that directory, the way Claude Code names it. The daemon reads the item with
+  `/usr/bin/security find-generic-password -w`. Claude Code writes the item with that
+  same tool, so it is already on the item's access list and macOS does not prompt. Like
+  the file, the item is only read. When it is missing, the daemon falls back to
+  `.credentials.json`.
 - Expired access token: at most once every 10 min, the provider runs
   `claude auth status --json`, which makes the CLI refresh its own token, and then
-  re-reads the file. If that doesn't help, it shows the stale data with
+  reads the credentials again. If that doesn't help, it shows the stale data with
   "Open Claude Code to refresh it".
 - Polling: every 300 s by default. `claude.min_endpoint_interval_secs` sets the shortest
   gap between two endpoint calls (default 180 s, minimum 120 s). Forced refreshes use a
@@ -89,5 +98,7 @@ rollout fills in the windows.
 
 API-equivalent cost uses LiteLLM's `model_prices_and_context_window.json`: a vendored
 subset (`data/pricing/litellm-subset.json`) plus a daily refresh cached in
-`$XDG_CACHE_HOME/token-station/pricing.json` (`pricing.auto_update`). Long-context tiers
+`$XDG_CACHE_HOME/token-station/pricing.json`, or
+`~/Library/Caches/dev.soldunov.TokenStation/pricing.json` on macOS
+(`pricing.auto_update`). Long-context tiers
 (over 200k prompt tokens) apply per request. Unknown models are counted but not priced.

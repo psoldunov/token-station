@@ -2,8 +2,12 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 
+#[cfg(not(target_os = "macos"))]
+use clap::ValueEnum;
+
+#[cfg(not(target_os = "macos"))]
 use crate::integration::DesktopChoice;
 
 /// Exit code for "the bus name is already taken": `EX_TEMPFAIL`, which the unit
@@ -25,12 +29,19 @@ pub struct Cli {
 pub enum Command {
     /// Run the background service that owns `dev.soldunov.TokenStation`.
     Daemon {
-        /// Config file to use instead of the XDG one.
+        /// Config file to use instead of the default one.
         #[arg(long, value_name = "PATH")]
         config: Option<PathBuf>,
         /// Serve a recorded snapshot instead of the real CLIs.
         #[arg(long, value_name = "PATH")]
         fixture: Option<PathBuf>,
+        /// Shut down when stdin reaches EOF.
+        ///
+        /// Hidden because it is not for people: the macOS app spawns the daemon
+        /// as a helper and holds the write end of the pipe, which is how the
+        /// helper never outlives the app that started it.
+        #[arg(long, hide = true)]
+        exit_on_stdin_close: bool,
     },
     /// Print the current usage.
     Status {
@@ -47,14 +58,18 @@ pub enum Command {
         wrap: Option<String>,
     },
     /// Standalone `StatusNotifierItem` tray icon.
+    #[cfg(not(target_os = "macos"))]
     Tray,
     /// Install the user services and desktop integration.
+    #[cfg(not(target_os = "macos"))]
     Setup(SetupArgs),
     /// Remove what `setup` installed.
+    #[cfg(not(target_os = "macos"))]
     Uninstall,
 }
 
 /// Flags of `token-station setup`.
+#[cfg(not(target_os = "macos"))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, clap::Args)]
 pub struct SetupArgs {
     /// Which front end to install; `auto` reads `$XDG_CURRENT_DESKTOP`.
@@ -75,6 +90,7 @@ pub struct SetupArgs {
 }
 
 /// `--desktop`.
+#[cfg(not(target_os = "macos"))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum DesktopArg {
     #[default]
@@ -84,6 +100,7 @@ pub enum DesktopArg {
     Other,
 }
 
+#[cfg(not(target_os = "macos"))]
 impl From<DesktopArg> for DesktopChoice {
     fn from(value: DesktopArg) -> DesktopChoice {
         match value {
@@ -95,6 +112,7 @@ impl From<DesktopArg> for DesktopChoice {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 impl SetupArgs {
     /// The options the installer works from.
     #[must_use]
@@ -135,12 +153,38 @@ mod tests {
             "/tmp/f.json",
         ]);
         match command {
-            Command::Daemon { config, fixture } => {
+            Command::Daemon {
+                config,
+                fixture,
+                exit_on_stdin_close,
+            } => {
                 assert_eq!(config, Some(PathBuf::from("/tmp/c.toml")));
                 assert_eq!(fixture, Some(PathBuf::from("/tmp/f.json")));
+                assert!(!exit_on_stdin_close);
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn the_stdin_lifeline_is_opt_in_and_hidden() {
+        assert!(matches!(
+            parse(&["daemon", "--exit-on-stdin-close"]),
+            Command::Daemon {
+                exit_on_stdin_close: true,
+                ..
+            }
+        ));
+        let daemon = Cli::command()
+            .get_subcommands()
+            .find(|c| c.get_name() == "daemon")
+            .expect("a daemon subcommand")
+            .clone();
+        let flag = daemon
+            .get_arguments()
+            .find(|a| a.get_id() == "exit_on_stdin_close")
+            .expect("the flag");
+        assert!(flag.is_hide_set(), "it is not a flag for people");
     }
 
     #[test]
@@ -166,10 +210,28 @@ mod tests {
     #[test]
     fn the_subcommand_is_optional() {
         assert!(Cli::parse_from(["token-station"]).command.is_none());
+    }
+
+    /// The desktop integration is Linux's; macOS installs an app bundle instead.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn the_desktop_commands_are_there_on_linux() {
         assert!(matches!(parse(&["tray"]), Command::Tray));
         assert!(matches!(parse(&["uninstall"]), Command::Uninstall));
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_desktop_commands_are_not_on_macos() {
+        for command in ["tray", "setup", "uninstall"] {
+            assert!(
+                Cli::try_parse_from(["token-station", command]).is_err(),
+                "{command} should not exist on macOS"
+            );
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn setup_defaults_to_an_automatic_install() {
         let Command::Setup(args) = parse(&["setup"]) else {
@@ -182,6 +244,7 @@ mod tests {
         assert_eq!(options.payload_dir, None);
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn force_is_opt_in() {
         let Command::Setup(args) = parse(&["setup", "--force"]) else {
@@ -190,6 +253,7 @@ mod tests {
         assert!(args.options().force);
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn setup_takes_every_documented_flag() {
         let Command::Setup(args) = parse(&[
@@ -210,6 +274,7 @@ mod tests {
         assert_eq!(options.payload_dir, Some(PathBuf::from("/tmp/payload")));
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn an_unknown_desktop_is_rejected() {
         assert!(Cli::try_parse_from(["token-station", "setup", "--desktop", "cinnamon"]).is_err());

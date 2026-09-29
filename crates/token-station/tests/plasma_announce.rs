@@ -1,3 +1,6 @@
+#![cfg(not(target_os = "macos"))]
+//! Linux only: the session bus, the tray and the desktop integration.
+
 //! `setup` and `uninstall` tell a running plasmashell about the applet, on a
 //! private bus standing in for the session.
 //!
@@ -53,6 +56,7 @@ async fn next_signal(signals: &mut zbus::MessageStream) -> (String, String) {
 fn env_for(root: &Path) -> Env {
     let at = |suffix: &str| Some(root.join(suffix).to_string_lossy().into_owned());
     Env {
+        socket: None,
         home: at("home"),
         config_home: at("config"),
         state_home: at("state"),

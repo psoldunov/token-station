@@ -12,13 +12,14 @@ use ts_core::provider::{Ingest, IngestError, Provider, RefreshOutcome};
 use ts_core::snapshot::{BreakdownRow, Credits, ProviderId, ProviderSnapshot, UsageWindow};
 use ts_core::tokens::TokenLedger;
 
-use crate::credentials::{self, Credentials};
+use crate::credentials::{Credentials, CredentialsError};
 use crate::env::{self, ClaudeEnv};
 use crate::labels;
 use crate::logs::{self, LogScanState};
 use crate::oauth_usage::{self, FetchOutcome};
 use crate::state::{self, Decision, LastOutcome, LimitsState, StateInputs};
 use crate::statusline;
+use crate::store::CredentialStore;
 
 const AUTH_STATUS_TIMEOUT: Duration = Duration::from_secs(20);
 const AUTH_STATUS_MIN_INTERVAL_SECS: i64 = 600;
@@ -39,21 +40,21 @@ struct Observations {
 
 /// Where [`probe_io`] should look. Gathering it touches no disk, so it can be
 /// built on a runtime thread and the reads done on a blocking one.
-#[derive(Debug, Clone)]
 struct IoProbe {
     binary_found: bool,
-    credentials: PathBuf,
+    credentials: Arc<CredentialStore>,
     projects: Vec<PathBuf>,
 }
 
 /// Read the facts [`IoCache`] holds. Blocking.
 fn probe_io(probe: &IoProbe, now: i64) -> IoCache {
-    let credentials_file_exists = probe.credentials.exists();
+    // One read, not a stat and then a read: on macOS the sign-in is in the
+    // Keychain, where "is it there" is the same subprocess as "what is it".
+    let loaded = probe.credentials.load();
     IoCache {
         claude_binary_found: probe.binary_found,
-        credentials_file_exists,
-        credentials_expired: credentials_file_exists
-            && credentials::load(&probe.credentials).is_ok_and(|c| c.expired(now)),
+        credentials_file_exists: !matches!(loaded, Err(CredentialsError::NotFound)),
+        credentials_expired: loaded.is_ok_and(|c| c.expired(now)),
         projects_dir_exists: probe.projects.iter().any(|p| p.exists()),
     }
 }
@@ -98,6 +99,30 @@ pub struct ClaudeProvider {
         reason = "outer level is `lookup performed`, inner is `binary found`; flattening would re-walk PATH on every miss"
     )]
     binary_cache: Mutex<Option<Option<PathBuf>>>,
+    /// Where the sign-in is read from. Built once with the provider, because
+    /// the reads of one refresh pass share its short-lived cache — and on
+    /// macOS each uncached read is a `/usr/bin/security` subprocess.
+    credentials: Arc<CredentialStore>,
+}
+
+/// Where this provider's sign-in is read from.
+#[cfg(not(target_os = "macos"))]
+fn build_store(config: &ClaudeConfig, env: &ClaudeEnv) -> CredentialStore {
+    CredentialStore::file(credentials_file(config, env))
+}
+
+/// Where this provider's sign-in is read from: the login Keychain first, then
+/// the file for a machine signed in before Claude Code moved to it.
+#[cfg(target_os = "macos")]
+fn build_store(config: &ClaudeConfig, env: &ClaudeEnv) -> CredentialStore {
+    CredentialStore::keychain_then_file(
+        crate::keychain::for_env(&config.config_dir, env),
+        credentials_file(config, env),
+    )
+}
+
+fn credentials_file(config: &ClaudeConfig, env: &ClaudeEnv) -> PathBuf {
+    env::config_dir(&config.config_dir, env).join(".credentials.json")
 }
 
 impl ClaudeProvider {
@@ -111,6 +136,7 @@ impl ClaudeProvider {
         let http = reqwest::Client::builder()
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
+        let credentials = Arc::new(build_store(&config, &env));
         let provider = ClaudeProvider {
             config,
             pricing,
@@ -123,6 +149,7 @@ impl ClaudeProvider {
             scan_state: Arc::new(tokio::sync::Mutex::new(LogScanState::default())),
             version_cache: Mutex::new(None),
             binary_cache: Mutex::new(None),
+            credentials,
         };
         // Populate the IO cache once up front so a `snapshot()` taken before the
         // first `refresh_limits`/`refresh_tokens` tick still reflects reality
@@ -130,7 +157,7 @@ impl ClaudeProvider {
         // the daemon only ever builds providers on a blocking thread.
         let probe = IoProbe {
             binary_found: provider.claude_binary().is_some(),
-            credentials: provider.credentials_path(),
+            credentials: provider.credential_store(),
             projects: provider.projects_dir_candidates(),
         };
         provider.store_io_cache(probe_io(&probe, unix_now()));
@@ -141,8 +168,42 @@ impl ClaudeProvider {
         env::config_dir(&self.config.config_dir, &self.env)
     }
 
-    fn credentials_path(&self) -> PathBuf {
-        self.config_dir().join(".credentials.json")
+    /// Where this provider's sign-in is read from.
+    ///
+    /// Built once and kept, so the reads one refresh pass makes share the
+    /// store's short-lived cache instead of each going back to the source.
+    fn credential_store(&self) -> Arc<CredentialStore> {
+        Arc::clone(&self.credentials)
+    }
+
+    /// Read the sign-in off the runtime threads.
+    ///
+    /// It is a disk read on a home directory that may be on a network mount,
+    /// and on macOS it is a subprocess; neither belongs on a runtime thread.
+    async fn load_credentials(&self) -> Result<Credentials, CredentialsError> {
+        self.read_credentials(false).await
+    }
+
+    /// As [`ClaudeProvider::load_credentials`], going back to the source.
+    async fn reload_credentials(&self) -> Result<Credentials, CredentialsError> {
+        self.read_credentials(true).await
+    }
+
+    async fn read_credentials(&self, fresh: bool) -> Result<Credentials, CredentialsError> {
+        let store = self.credential_store();
+        let read = move || {
+            if fresh {
+                store.load_fresh()
+            } else {
+                store.load()
+            }
+        };
+        match tokio::task::spawn_blocking(read).await {
+            Ok(result) => result,
+            Err(error) => Err(CredentialsError::Unavailable(format!(
+                "the credentials read did not run: {error}"
+            ))),
+        }
     }
 
     /// Both places transcripts can live, without asking the disk which exist.
@@ -218,10 +279,28 @@ impl ClaudeProvider {
         ua
     }
 
+    /// A command running the discovered `claude`, with a `PATH` its own child
+    /// processes can work with.
+    ///
+    /// A `claude` installed by a JavaScript package manager is a script that
+    /// defers to an interpreter on `PATH`, and the daemon's own `PATH` is
+    /// whatever started it — Finder's four entries on macOS, a systemd user
+    /// service's on Linux. Inheriting that unchanged is how a CLI that
+    /// discovery found perfectly well fails on its shebang line.
+    fn command(&self, bin: &std::path::Path) -> tokio::process::Command {
+        let mut cmd = tokio::process::Command::new(bin);
+        cmd.env(
+            "PATH",
+            ts_core::discovery::child_path_in(bin, &self.env.search),
+        )
+        .kill_on_drop(true);
+        cmd
+    }
+
     async fn detect_version(&self) -> Option<String> {
         let bin = self.claude_binary()?;
-        let mut cmd = tokio::process::Command::new(bin);
-        cmd.arg("--version").kill_on_drop(true);
+        let mut cmd = self.command(&bin);
+        cmd.arg("--version");
         let output = tokio::time::timeout(AUTH_STATUS_TIMEOUT, cmd.output())
             .await
             .ok()?
@@ -242,11 +321,8 @@ impl ClaudeProvider {
         let Some(bin) = self.claude_binary() else {
             return;
         };
-        let mut cmd = tokio::process::Command::new(bin);
-        cmd.arg("auth")
-            .arg("status")
-            .arg("--json")
-            .kill_on_drop(true);
+        let mut cmd = self.command(&bin);
+        cmd.arg("auth").arg("status").arg("--json");
         let _ = tokio::time::timeout(AUTH_STATUS_TIMEOUT, cmd.output()).await;
     }
 
@@ -277,7 +353,7 @@ impl ClaudeProvider {
         let binary = self.claude_binary_off_thread().await;
         let probe = IoProbe {
             binary_found: binary.is_some(),
-            credentials: self.credentials_path(),
+            credentials: self.credential_store(),
             projects: self.projects_dir_candidates(),
         };
         match tokio::task::spawn_blocking(move || probe_io(&probe, now)).await {
@@ -348,16 +424,15 @@ impl ClaudeProvider {
         obs.last_endpoint_success_at = Some(now);
     }
 
-    async fn refresh_expired_credentials(
-        &self,
-        creds_path: &std::path::Path,
-        now: i64,
-    ) -> Option<Credentials> {
+    async fn refresh_expired_credentials(&self, now: i64) -> Option<Credentials> {
         if self.should_check_auth_status(now) {
             self.run_auth_status().await;
             self.mark_auth_status_checked(now);
         }
-        credentials::load(creds_path).ok()
+        // Fresh: `claude auth status` is exactly the thing that may have
+        // rewritten the sign-in, so a cached read here would hand back the
+        // expired token it was called to replace.
+        self.reload_credentials().await.ok()
     }
 }
 
@@ -369,6 +444,10 @@ fn unix_now() -> i64 {
 
 const SIGN_IN_EXPIRED_MESSAGE: &str = "Sign-in expired. Open Claude Code to refresh it.";
 const NOT_SIGNED_IN_MESSAGE: &str = "Not signed in to Claude Code. Run `claude` and log in.";
+/// Shown when the sign-in is there and unreadable, which on macOS means a
+/// Keychain this process cannot be shown — an SSH session, typically.
+const UNREADABLE_SIGN_IN_MESSAGE: &str =
+    "Cannot read the Claude Code sign-in. Open Token Station from the desktop session.";
 
 #[async_trait]
 impl Provider for ClaudeProvider {
@@ -397,14 +476,28 @@ impl Provider for ClaudeProvider {
             }
         }
 
-        let creds_path = self.credentials_path();
-        let Ok(mut creds) = credentials::load(&creds_path) else {
-            self.set_last_outcome(LastOutcome::Skipped(NOT_SIGNED_IN_MESSAGE.to_string()));
-            return RefreshOutcome::Skipped(NOT_SIGNED_IN_MESSAGE.to_string());
+        let mut creds = match self.load_credentials().await {
+            Ok(creds) => creds,
+            // "Not signed in" and "signed in, and this process cannot see it"
+            // send the user to two different places, so they are two different
+            // messages — and two different states. A missing sign-in is
+            // reported as skipped, which reads as "not signed in"; a sign-in
+            // that is there and unreadable is a failure, which surfaces the
+            // message and keeps showing older data as stale rather than
+            // throwing it away.
+            Err(CredentialsError::Unavailable(detail)) => {
+                tracing::warn!(%detail, "cannot read the Claude Code sign-in");
+                self.set_last_outcome(LastOutcome::Failed(UNREADABLE_SIGN_IN_MESSAGE.to_string()));
+                return RefreshOutcome::Failed(UNREADABLE_SIGN_IN_MESSAGE.to_string());
+            }
+            Err(_) => {
+                self.set_last_outcome(LastOutcome::Skipped(NOT_SIGNED_IN_MESSAGE.to_string()));
+                return RefreshOutcome::Skipped(NOT_SIGNED_IN_MESSAGE.to_string());
+            }
         };
 
         if creds.expired(now) {
-            if let Some(refreshed) = self.refresh_expired_credentials(&creds_path, now).await {
+            if let Some(refreshed) = self.refresh_expired_credentials(now).await {
                 creds = refreshed;
             }
             if creds.expired(now) {
@@ -437,7 +530,7 @@ impl Provider for ClaudeProvider {
                 }
             },
             FetchOutcome::Unauthorized => {
-                let _ = self.refresh_expired_credentials(&creds_path, now).await;
+                let _ = self.refresh_expired_credentials(now).await;
                 self.set_last_outcome(LastOutcome::Skipped(SIGN_IN_EXPIRED_MESSAGE.to_string()));
                 RefreshOutcome::Skipped(SIGN_IN_EXPIRED_MESSAGE.to_string())
             }

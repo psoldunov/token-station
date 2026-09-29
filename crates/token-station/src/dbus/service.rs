@@ -1,28 +1,26 @@
 //! The `dev.soldunov.TokenStation1` interface implementation.
+//!
+//! An adapter over [`Api`]: it does the zbus plumbing and the mapping from
+//! [`SetSettingsError`] to a D-Bus error name, and nothing else.
 
 use std::sync::Arc;
 
 use zbus::fdo;
 
+use crate::api::Api;
 use crate::backend::Backend;
-use crate::coalesce::Coalescer;
-use crate::dbus::{MAX_STATUSLINE_BYTES, MAX_WINDOW_ID_LEN, OBJECT_PATH};
-use crate::history;
+use crate::dbus::OBJECT_PATH;
 use crate::publish::Publisher;
 
 /// Serves the published snapshot and forwards calls to a [`Backend`].
 pub struct TokenStation1 {
-    publisher: Arc<Publisher>,
-    backend: Arc<dyn Backend>,
-    refresh_gate: Arc<Coalescer>,
+    api: Api,
 }
 
 impl TokenStation1 {
     pub fn new(publisher: Arc<Publisher>, backend: Arc<dyn Backend>) -> TokenStation1 {
         TokenStation1 {
-            publisher,
-            backend,
-            refresh_gate: Arc::new(Coalescer::default()),
+            api: Api::new(publisher, backend),
         }
     }
 }
@@ -32,62 +30,43 @@ impl TokenStation1 {
     /// Full state as JSON.
     #[zbus(property)]
     fn snapshot(&self) -> String {
-        self.publisher.snapshot_json()
+        self.api.snapshot_json()
     }
 
     /// Increments with every new snapshot.
     #[zbus(property)]
     fn revision(&self) -> u64 {
-        self.publisher.revision()
+        self.api.revision()
     }
 
     /// Refresh every provider now; concurrent callers share one run.
     async fn refresh(&self) {
-        let backend = Arc::clone(&self.backend);
-        self.refresh_gate.run(|| backend.refresh()).await;
+        self.api.refresh().await;
     }
 
     /// Recorded samples for one window since `since` (Unix seconds).
     async fn get_history(&self, provider: &str, window_id: &str, since: u64) -> String {
-        let Some((provider, window_id)) = validate_history_args(provider, window_id) else {
-            return "[]".into();
-        };
-        let since = i64::try_from(since).unwrap_or(i64::MAX);
-        let points = self.backend.history(provider, &window_id, since).await;
-        history::to_json(&points)
+        self.api.history_json(provider, window_id, since).await
     }
 
     /// Current config as JSON.
     fn get_settings(&self) -> String {
-        self.backend.settings_json()
+        self.api.settings_json()
     }
 
     /// Replace the config; invalid input lists every problem.
     async fn set_settings(&self, json: &str) -> fdo::Result<()> {
-        if json.len() > MAX_SETTINGS_BYTES {
-            return Err(fdo::Error::InvalidArgs(format!(
-                "settings JSON is larger than {MAX_SETTINGS_BYTES} bytes"
-            )));
-        }
-        self.backend.set_settings(json).await.map_err(as_dbus_error)
+        self.api.set_settings(json).await.map_err(as_dbus_error)
     }
 
     /// Raw statusline JSON piped by `token-station statusline`.
     async fn ingest_claude_statusline(&self, json: &str) -> fdo::Result<()> {
-        if json.len() > MAX_STATUSLINE_BYTES {
-            return Err(fdo::Error::InvalidArgs(format!(
-                "statusline payload is larger than {MAX_STATUSLINE_BYTES} bytes"
-            )));
-        }
-        self.backend
+        self.api
             .ingest_claude_statusline(json)
             .await
             .map_err(fdo::Error::InvalidArgs)
     }
 }
-
-/// Settings documents are small; anything larger is not a config.
-const MAX_SETTINGS_BYTES: usize = 256 * 1024;
 
 /// Which D-Bus error a failed `SetSettings` becomes.
 ///
@@ -100,15 +79,6 @@ fn as_dbus_error(error: crate::backend::SetSettingsError) -> fdo::Error {
         SetSettingsError::Rejected(problems) => fdo::Error::InvalidArgs(problems.join("; ")),
         SetSettingsError::Failed(message) => fdo::Error::Failed(message),
     }
-}
-
-/// Accept only a known provider and a plausible window id.
-fn validate_history_args(provider: &str, window_id: &str) -> Option<(ts_core::ProviderId, String)> {
-    let provider = provider.parse::<ts_core::ProviderId>().ok()?;
-    let usable = !window_id.is_empty()
-        && window_id.len() <= MAX_WINDOW_ID_LEN
-        && !window_id.chars().any(char::is_control);
-    usable.then(|| (provider, window_id.to_string()))
 }
 
 /// Publish the object, then ask for the well-known name.
@@ -135,7 +105,6 @@ pub async fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ts_core::ProviderId;
 
     #[test]
     fn bad_input_and_a_failed_write_are_different_errors() {
@@ -160,15 +129,14 @@ mod tests {
     }
 
     #[test]
-    fn history_arguments_are_validated() {
+    fn an_oversized_settings_document_still_reads_as_bad_input() {
+        let error = as_dbus_error(crate::backend::SetSettingsError::Rejected(vec![format!(
+            "settings JSON is larger than {} bytes",
+            crate::api::MAX_SETTINGS_BYTES
+        )]));
         assert_eq!(
-            validate_history_args("claude", "session"),
-            Some((ProviderId::Claude, "session".to_string()))
+            error.to_string(),
+            "org.freedesktop.DBus.Error.InvalidArgs: settings JSON is larger than 262144 bytes"
         );
-        assert!(validate_history_args("gemini", "session").is_none());
-        assert!(validate_history_args("claude", "").is_none());
-        assert!(validate_history_args("claude", "a\u{0}b").is_none());
-        assert!(validate_history_args("claude", &"x".repeat(129)).is_none());
-        assert!(validate_history_args("claude", &"x".repeat(128)).is_some());
     }
 }

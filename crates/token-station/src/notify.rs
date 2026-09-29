@@ -3,24 +3,27 @@
 //! The text is built by pure functions so it can be asserted without a notification
 //! daemon; [`Notifier`] is the seam the tests replace.
 //!
-//! The call goes straight to `org.freedesktop.Notifications` over the session bus.
-//! Convenience wrappers around that interface tend to build a runtime of their own,
-//! which panics ("cannot start a runtime from within a runtime") the moment an
-//! alert fires from a tokio worker thread, so the daemon owns the proxy instead.
+//! A notifier is handed the whole [`Alert`], not a rendered summary and body: on
+//! Linux [`DesktopNotifier`] words it with [`alert_text`] and shows it, while on
+//! macOS the socket hub forwards the structured fields and the menu bar app
+//! words it itself in the user's language. Only the Linux notifier talks to
+//! `org.freedesktop.Notifications`, and it does so straight over the session
+//! bus: convenience wrappers around that interface tend to build a runtime of
+//! their own, which panics ("cannot start a runtime from within a runtime") the
+//! moment an alert fires from a tokio worker thread.
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use ts_core::Level;
 use ts_core::alerts::{Alert, AlertKind};
-use zbus::zvariant::Value;
 
 /// Desktop entry / icon name shared with the `.desktop` file.
 pub const APP_ID: &str = "dev.soldunov.TokenStation";
 pub const APP_NAME: &str = "Token Station";
 
 /// How long a notification stays up; `-1` leaves it to the server's default.
+#[cfg(not(target_os = "macos"))]
 const EXPIRE_DEFAULT: i32 = -1;
 
 /// Longest one notification may take before it is given up on.
@@ -30,17 +33,19 @@ pub const NOTIFY_TIMEOUT: Duration = Duration::from_secs(2);
 pub const NOTIFICATIONS_SERVICE: &str = "org.freedesktop.Notifications";
 pub const NOTIFICATIONS_PATH: &str = "/org/freedesktop/Notifications";
 
-/// Something that can show a desktop notification.
+/// Something that can show one alert to the user.
 #[async_trait]
 pub trait Notifier: Send + Sync {
-    async fn notify(&self, summary: &str, body: &str, level: Level);
+    async fn notify(&self, alert: &Alert, now: i64);
 }
 
 /// Sends through the session bus, on the connection the daemon already owns.
+#[cfg(not(target_os = "macos"))]
 pub struct DesktopNotifier {
     connection: zbus::Connection,
 }
 
+#[cfg(not(target_os = "macos"))]
 impl DesktopNotifier {
     #[must_use]
     pub fn new(connection: zbus::Connection) -> DesktopNotifier {
@@ -48,6 +53,9 @@ impl DesktopNotifier {
     }
 
     async fn send(&self, summary: &str, body: &str, level: Level) -> zbus::Result<u32> {
+        use std::collections::HashMap;
+        use zbus::zvariant::Value;
+
         let proxy = zbus::Proxy::new(
             &self.connection,
             NOTIFICATIONS_SERVICE,
@@ -77,16 +85,19 @@ impl DesktopNotifier {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 #[async_trait]
 impl Notifier for DesktopNotifier {
-    async fn notify(&self, summary: &str, body: &str, level: Level) {
-        if let Err(error) = self.send(summary, body, level).await {
+    async fn notify(&self, alert: &Alert, now: i64) {
+        let (summary, body, level) = alert_text(alert, now);
+        if let Err(error) = self.send(&summary, &body, level).await {
             tracing::warn!(%error, "cannot show desktop notification");
         }
     }
 }
 
 /// The `urgency` hint the notification spec defines.
+#[cfg(not(target_os = "macos"))]
 fn urgency(level: Level) -> u8 {
     match level {
         Level::Critical => 2,
@@ -99,7 +110,7 @@ pub struct SilentNotifier;
 
 #[async_trait]
 impl Notifier for SilentNotifier {
-    async fn notify(&self, _summary: &str, _body: &str, _level: Level) {}
+    async fn notify(&self, _alert: &Alert, _now: i64) {}
 }
 
 /// Summary, body and urgency for one alert, as seen by the user.
@@ -175,9 +186,9 @@ fn format_duration(seconds: i64, gap: &str, d: &str, h: &str, m: &str) -> String
 /// subsequent refresh, and the tray simply stops updating.
 pub async fn deliver(notifier: &dyn Notifier, alerts: &[Alert], now: i64) {
     for alert in alerts {
-        let (summary, body, level) = alert_text(alert, now);
+        let (summary, body, _) = alert_text(alert, now);
         tracing::info!(%summary, %body, "alert");
-        let shown = notifier.notify(&summary, &body, level);
+        let shown = notifier.notify(alert, now);
         if tokio::time::timeout(NOTIFY_TIMEOUT, shown).await.is_err() {
             tracing::warn!(%summary, "the notification server did not answer in time");
         }
@@ -198,12 +209,13 @@ pub(crate) mod testing {
 
     #[async_trait]
     impl Notifier for RecordingNotifier {
-        async fn notify(&self, summary: &str, body: &str, level: Level) {
+        async fn notify(&self, alert: &Alert, now: i64) {
+            let (summary, body, level) = alert_text(alert, now);
             let mut sent = self
                 .sent
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            sent.push((summary.into(), body.into(), level));
+            sent.push((summary, body, level));
         }
     }
 
@@ -255,6 +267,7 @@ mod tests {
         assert_eq!(level, Level::Normal);
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn the_urgency_hint_follows_the_level() {
         assert_eq!(urgency(Level::Critical), 2);
@@ -309,7 +322,9 @@ mod tests {
 
     #[tokio::test]
     async fn silent_notifier_does_nothing() {
-        SilentNotifier.notify("a", "b", Level::Critical).await;
+        SilentNotifier
+            .notify(&alert(AlertKind::Critical, 99.0, None), 0)
+            .await;
     }
 
     /// A notification server that accepts the call and never answers.
@@ -317,7 +332,7 @@ mod tests {
 
     #[async_trait]
     impl Notifier for HangingNotifier {
-        async fn notify(&self, _summary: &str, _body: &str, _level: Level) {
+        async fn notify(&self, _alert: &Alert, _now: i64) {
             std::future::pending::<()>().await;
         }
     }

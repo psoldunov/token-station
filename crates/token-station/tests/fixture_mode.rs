@@ -1,3 +1,6 @@
+#![cfg(not(target_os = "macos"))]
+//! Linux only: the session bus, the tray and the desktop integration.
+
 //! Fixture mode served over a private bus: what front-end developers actually poke.
 
 mod common;
@@ -44,7 +47,9 @@ async fn the_fixture_daemon_serves_live_countdowns() {
     )
     .await
     .expect("served");
-    player.publisher().attach(connection.clone());
+    player.publisher().attach(std::sync::Arc::new(
+        token_station::dbus::sink::PropertiesSink::new(connection.clone()),
+    ));
     assert_eq!(
         connection
             .request_name_with_flags(BUS_NAME, RequestNameFlags::DoNotQueue.into())

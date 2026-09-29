@@ -100,8 +100,9 @@ struct RecordingNotifier {
 
 #[async_trait]
 impl Notifier for RecordingNotifier {
-    async fn notify(&self, summary: &str, _body: &str, _level: Level) {
-        self.sent.lock().unwrap().push(summary.to_string());
+    async fn notify(&self, alert: &ts_core::alerts::Alert, now: i64) {
+        let (summary, _, _) = token_station::notify::alert_text(alert, now);
+        self.sent.lock().unwrap().push(summary);
     }
 }
 
@@ -117,6 +118,7 @@ fn harness(percent: f64) -> Harness {
     let dir = tempfile::tempdir().expect("temp dir");
     let root = dir.path().to_string_lossy().into_owned();
     let paths = Paths::resolve(&Env {
+        socket: None,
         home: Some(root.clone()),
         config_home: Some(format!("{root}/config")),
         state_home: Some(format!("{root}/state")),
