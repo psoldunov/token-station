@@ -1,37 +1,36 @@
 #:schema https://www.ensemblr.dev/schemas/settings.schema.json
 
-# Every command goes through the flake's dev shell: it carries rustc, clippy,
-# rustfmt, cargo-deny, cargo-machete, plasmoidviewer and qmllint, and the
-# system cargo has no rustc beside it. The dev shell is Linux-only.
+# Linux commands use the flake's dev shell. macOS uses the host Rust/Xcode
+# toolchains because the flake only exposes Linux systems.
 
 [scripts]
-# Realises the dev shell and downloads every locked crate.
-setup = "nix develop -c cargo fetch --locked"
+# Fetches Rust dependencies and, on macOS, resolves the Swift package too.
+setup = "if [ \"$(uname -s)\" = Darwin ]; then .ensemblr/scripts/macos.sh setup; else nix develop -c cargo fetch --locked; fi"
 
-# The applet in plasmoidviewer against a fixture daemon on a private bus, so it
-# runs beside the installed daemon and never reads real credentials.
-[scripts.run.applet-preview]
-command = "nix develop -c frontends/plasma/tests/preview.sh"
+# Opens the native front end against a fixture daemon on an isolated transport,
+# so it can run beside an installed daemon without reading real credentials.
+[scripts.run.preview]
+command = "if [ \"$(uname -s)\" = Darwin ]; then .ensemblr/scripts/macos.sh preview; else nix develop -c frontends/plasma/tests/preview.sh; fi"
 icon = "eye"
 default = true
 
 [scripts.run.test]
-command = "nix develop -c cargo test --workspace --locked"
+command = "if [ \"$(uname -s)\" = Darwin ]; then .ensemblr/scripts/macos.sh test; else nix develop -c cargo test --workspace --locked; fi"
 icon = "test-tube"
 
-# The same gates as the flake's fmt and clippy checks, plus qmllint on the applet.
+# Runs the native platform's formatting, static-analysis and frontend lint gates.
 [scripts.run.lint]
-command = "nix develop -c sh -c 'cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- --deny warnings && frontends/plasma/tests/lint.sh'"
+command = "if [ \"$(uname -s)\" = Darwin ]; then .ensemblr/scripts/macos.sh lint; else nix develop -c sh -c 'cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- --deny warnings && frontends/plasma/tests/lint.sh'; fi"
 icon = "list-checks"
 
-# The installable package: daemon, Plasma applet and GNOME extension, in ./result.
+# Builds ./result on Linux or frontends/macos/build/Token Station.app on macOS.
 [scripts.run.build]
-command = "nix build -L"
+command = "if [ \"$(uname -s)\" = Darwin ]; then .ensemblr/scripts/macos.sh build; else nix build -L; fi"
 icon = "hammer"
 
-# Everything CI's flake-check job runs, including deny, machete and the GNOME VM test.
-[scripts.run.flake-check]
-command = "nix flake check -L --keep-going"
+# Runs the same platform-specific gates as CI, including a distributable build.
+[scripts.run.ci-check]
+command = "if [ \"$(uname -s)\" = Darwin ]; then .ensemblr/scripts/macos.sh check; else nix flake check -L --keep-going; fi"
 icon = "shield-check"
 
 [infisical]
