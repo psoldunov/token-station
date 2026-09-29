@@ -40,10 +40,14 @@ to the keyed windows, so new codenamed keys don't break it.
   `claude auth status --json`, which makes the CLI refresh its own token, and then
   reads the credentials again. If that doesn't help, it shows the stale data with
   "Open Claude Code to refresh it".
-- Polling: every 300 s by default. `claude.min_endpoint_interval_secs` sets the shortest
-  gap between two endpoint calls (default 180 s, minimum 120 s). Forced refreshes use a
-  30 s minimum instead. On a 429 the provider honours `Retry-After`, or backs off
-  exponentially up to 1 h if there isn't one.
+- Polling: every 600 s by default. At 300 s the endpoint returned 429 often enough for
+  users to notice. `claude.min_endpoint_interval_secs` sets the shortest gap between two
+  endpoint calls (default 300 s, minimum 120 s). Forced refreshes use a 30 s minimum
+  instead. Each consecutive 429 doubles the backoff, from 600 s up to 1 h. A longer
+  `Retry-After` wins. No call is made during a backoff, forced or not.
+- A 429 shows no warning while the last good reading is under 30 min old, because the
+  numbers on screen are still current and the daemon retries on its own. After that the
+  provider shows as stale with "Rate limited by Claude's usage endpoint."
 - User-Agent: without the CLI's User-Agent the endpoint rate-limits hard, and other
   usage monitors that call it have hit the same problem. You can change the value with
   `claude.user_agent`. Keep in mind this endpoint is not a documented API and may change.

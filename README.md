@@ -186,7 +186,7 @@ daemon.
 
 ```toml
 [general]
-limits_interval_secs = 300    # plan-limit polling (120–86400)
+limits_interval_secs = 600    # plan-limit polling (120–86400)
 tokens_interval_secs = 60     # local log scanning (>= 15)
 history_retention_days = 35   # 1–366
 
@@ -209,7 +209,7 @@ config_dir = ""               # default: $CLAUDE_CONFIG_DIR, else ~/.claude
 binary = ""                   # default: discover `claude` on PATH and well-known directories
 use_oauth_endpoint = true
 user_agent = ""               # default: claude-code/<installed version>, like the CLI itself
-min_endpoint_interval_secs = 180   # shortest gap between two endpoint calls (>= 120)
+min_endpoint_interval_secs = 300   # shortest gap between two endpoint calls (>= 120)
 
 [codex]
 enabled = true

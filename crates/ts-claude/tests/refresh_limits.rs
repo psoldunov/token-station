@@ -127,4 +127,16 @@ async fn rate_limited_backs_off_using_retry_after() {
 
     let next = provider.next_limits_refresh(0, std::time::Duration::from_secs(60));
     assert!(next.as_secs() >= 100, "expected long backoff, got {next:?}");
+
+    // Inside the backoff even a forced refresh stays off the network, and it
+    // leaves the 429 as what the snapshot reports.
+    let during_backoff = provider.refresh_limits(true).await;
+    assert!(matches!(during_backoff, RefreshOutcome::Skipped(_)));
+    let snap = provider.snapshot(1_790_596_800);
+    assert_eq!(snap.state, ProviderState::Error);
+    assert_eq!(
+        snap.message.as_deref(),
+        Some("Rate limited by Claude's usage endpoint.")
+    );
+    assert_eq!(server.received_requests().await.map(|r| r.len()), Some(1));
 }
