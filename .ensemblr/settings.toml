@@ -1,3 +1,39 @@
+#:schema https://www.ensemblr.dev/schemas/settings.schema.json
+
+# Every command goes through the flake's dev shell: it carries rustc, clippy,
+# rustfmt, cargo-deny, cargo-machete, plasmoidviewer and qmllint, and the
+# system cargo has no rustc beside it. The dev shell is Linux-only.
+
+[scripts]
+# Realises the dev shell and downloads every locked crate.
+setup = "nix develop -c cargo fetch --locked"
+
+# The applet in plasmoidviewer against a fixture daemon on a private bus, so it
+# runs beside the installed daemon and never reads real credentials.
+[scripts.run.applet-preview]
+command = "nix develop -c frontends/plasma/tests/preview.sh"
+icon = "eye"
+default = true
+
+[scripts.run.test]
+command = "nix develop -c cargo test --workspace --locked"
+icon = "test-tube"
+
+# The same gates as the flake's fmt and clippy checks, plus qmllint on the applet.
+[scripts.run.lint]
+command = "nix develop -c sh -c 'cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- --deny warnings && frontends/plasma/tests/lint.sh'"
+icon = "list-checks"
+
+# The installable package: daemon, Plasma applet and GNOME extension, in ./result.
+[scripts.run.build]
+command = "nix build -L"
+icon = "hammer"
+
+# Everything CI's flake-check job runs, including deny, machete and the GNOME VM test.
+[scripts.run.flake-check]
+command = "nix flake check -L --keep-going"
+icon = "shield-check"
+
 [infisical]
 environment = "dev"
 path = "/"
