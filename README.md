@@ -135,6 +135,12 @@ The flags you are most likely to want are `--dry-run`, `--desktop kde|gnome|othe
 Code statusline, and refuses if the settings file is managed by Nix. `--force` replaces
 existing files that `setup` did not create, but it still never touches Nix-managed ones.
 
+### Homebrew (macOS)
+
+```sh
+brew install --cask psoldunov/tap/token-station
+```
+
 ### macOS
 
 Download `TokenStation-macOS.dmg` from the releases page, open it and drag
