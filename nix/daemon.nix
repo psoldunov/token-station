@@ -26,10 +26,37 @@ let
     # D-Bus integration tests start a private dbus-daemon.
     nativeCheckInputs = [ dbus ];
   };
-  cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+  # Dependencies for one cargo pass each, rather than crane's default of check,
+  # build and test in a row: every consumer waits only on its own set, and the
+  # static AppImage build compiles nothing it does not link.
+  depsFor =
+    args: suffix: command:
+    craneLib.buildDepsOnly (
+      args
+      // {
+        pname = "${commonArgs.pname}${suffix}";
+        buildPhaseCargoCommand = "cargoWithProfile ${command} ${commonArgs.cargoExtraArgs}";
+        doCheck = false;
+      }
+    );
+  # Tests build in cargo's own test profile, as `cargo test` does locally. The
+  # release profile's thin LTO with one codegen unit re-optimises every test
+  # binary, which made the test check take 12 minutes in CI.
+  testArgs = commonArgs // {
+    CARGO_PROFILE = "";
+  };
+  # The package links release builds; clippy reads check metadata.
+  cargoArtifacts = depsFor commonArgs "" "build";
+  checkArtifacts = depsFor commonArgs "-check" "check --all-targets";
+  testArtifacts = depsFor testArgs "-test" "test --no-run";
 in
 {
-  inherit commonArgs cargoArtifacts;
+  inherit
+    commonArgs
+    checkArtifacts
+    testArgs
+    testArtifacts
+    ;
 
   package = craneLib.buildPackage (
     commonArgs

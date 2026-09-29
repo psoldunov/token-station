@@ -78,19 +78,22 @@
         pkgs:
         let
           inherit (mkBuild pkgs) craneLib daemon;
-          args = daemon.commonArgs // {
-            inherit (daemon) cargoArtifacts;
-          };
         in
         {
           build = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
           clippy = craneLib.cargoClippy (
-            args
+            daemon.commonArgs
             // {
+              cargoArtifacts = daemon.checkArtifacts;
               cargoClippyExtraArgs = "--all-targets -- --deny warnings";
             }
           );
-          test = craneLib.cargoTest args;
+          test = craneLib.cargoTest (
+            daemon.testArgs
+            // {
+              cargoArtifacts = daemon.testArtifacts;
+            }
+          );
           fmt = craneLib.cargoFmt { inherit (daemon.commonArgs) src; };
           # Licences, bans and sources per deny.toml. Advisories need the
           # network, so CI runs them as a separate job.
