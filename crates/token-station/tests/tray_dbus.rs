@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use token_station::backend::Backend;
+use token_station::backend::{Backend, SetSettingsError};
 use token_station::dbus::{BUS_NAME, service};
 use token_station::publish::Publisher;
 use token_station::tray::client::{self, Update};
@@ -36,7 +36,7 @@ impl Backend for CountingBackend {
         Config::default().to_json()
     }
 
-    async fn set_settings(&self, _: &str) -> Result<(), Vec<String>> {
+    async fn set_settings(&self, _: &str) -> Result<(), SetSettingsError> {
         Ok(())
     }
 

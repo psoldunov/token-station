@@ -7,7 +7,8 @@
 use std::path::{Path, PathBuf};
 
 use token_station::integration::desktop::Desktop;
-use token_station::integration::manifest::Manifest;
+use token_station::integration::existing::SystemDirs;
+use token_station::integration::manifest::{ClaudeRecord, Manifest};
 use token_station::integration::{self, DesktopChoice, Session, SetupOptions};
 use token_station::paths::Env;
 
@@ -55,6 +56,17 @@ impl Home {
             // A bus that is not there: no test may reach the developer's own
             // session bus and stop the tray running in it.
             bus_address: Some("unix:path=/nonexistent/token-station-test".into()),
+            // Empty by default, so what this machine happens to have installed in
+            // `/usr/lib` or `/etc` never changes what a test sees.
+            system: SystemDirs::default(),
+        }
+    }
+
+    /// The same session, with the packaged-copy search pointed inside this home.
+    fn session_with_system(&self, desktop: Option<&str>, system: SystemDirs) -> Session {
+        Session {
+            system,
+            ..self.session(desktop)
         }
     }
 
@@ -489,15 +501,53 @@ fn a_nix_store_symlink_is_never_replaced_even_with_force() {
 
 #[test]
 fn a_packaged_unit_keeps_its_place_and_is_reported() {
-    // The system directories are read as they are, so this only asserts the
-    // reporting shape when a packaged copy does exist.
-    let packaged = Path::new("/usr/lib/systemd/user/token-station.service").exists()
-        || Path::new("/etc/systemd/user/token-station.service").exists();
-    if !packaged {
-        eprintln!("skipping: no packaged unit on this machine");
-        return;
-    }
     let home = Home::new(&["systemctl"]);
+    // A distribution package's unit, in a system directory of this test's own.
+    let system_units = home.path("usr/lib/systemd/user");
+    std::fs::create_dir_all(&system_units).unwrap();
+    std::fs::write(system_units.join("token-station.service"), "[Unit]\n").unwrap();
+    let system = SystemDirs {
+        units: vec![system_units],
+        ..SystemDirs::default()
+    };
+
+    let summary = integration::setup(
+        &options(DesktopChoice::Other, None),
+        &home.env(),
+        &home.session_with_system(Some("sway"), system),
+        NOW,
+    )
+    .unwrap();
+
+    assert!(summary.contains("left in charge"), "{summary}");
+    assert!(!home.path("config/systemd/user").exists());
+    // Nothing of ours to load, so nothing to disable later either.
+    let manifest = manifest_of(&home);
+    assert_eq!(manifest.systemd_unit, None);
+    assert!(
+        !home
+            .invocations()
+            .iter()
+            .any(|line| line.contains("enable")),
+        "{:?}",
+        home.invocations()
+    );
+}
+
+#[test]
+fn a_unit_home_manager_owns_is_neither_recorded_nor_enabled() {
+    let home = Home::new(&["systemctl"]);
+    // What a home-manager generation leaves at the unit's path: a symlink into
+    // the store. Rewriting it would replace the link, and `uninstall` would then
+    // `disable --now` a unit the user's own configuration owns.
+    let unit = home.path("config/systemd/user/token-station.service");
+    std::fs::create_dir_all(unit.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(
+        "/nix/store/abc123-token-station/token-station.service",
+        &unit,
+    )
+    .unwrap();
+
     let summary = integration::setup(
         &options(DesktopChoice::Other, None),
         &home.env(),
@@ -505,8 +555,32 @@ fn a_packaged_unit_keeps_its_place_and_is_reported() {
         NOW,
     )
     .unwrap();
-    assert!(summary.contains("left it in charge"), "{summary}");
-    assert!(!home.path("config/systemd/user").exists());
+
+    assert!(summary.contains("/nix/store"), "{summary}");
+    assert!(std::fs::symlink_metadata(&unit).unwrap().is_symlink());
+    let manifest = manifest_of(&home);
+    assert_eq!(manifest.systemd_unit, None, "we did not write it");
+    assert!(!manifest.files.contains(&unit));
+    let ran = home.invocations();
+    assert!(
+        !ran.iter().any(|line| line.contains("enable")),
+        "systemctl must not load a unit we did not write: {ran:?}"
+    );
+
+    // And `uninstall` leaves it alone rather than disabling it.
+    let summary = integration::uninstall(&home.env(), &home.session(Some("sway"))).unwrap();
+    assert!(
+        std::fs::symlink_metadata(&unit).unwrap().is_symlink(),
+        "{summary}"
+    );
+    assert!(
+        !home
+            .invocations()
+            .iter()
+            .any(|line| line.contains("disable")),
+        "{:?}",
+        home.invocations()
+    );
 }
 
 #[test]
@@ -582,6 +656,55 @@ fn uninstall_ignores_a_manifest_entry_outside_the_xdg_roots() {
             .path("data/dbus-1/services/dev.soldunov.TokenStation.service")
             .exists()
     );
+}
+
+#[test]
+fn uninstall_ignores_a_statusline_record_naming_another_file() {
+    let home = Home::new(&["systemctl"]);
+    integration::setup(
+        &options(DesktopChoice::Other, None),
+        &home.env(),
+        &home.session(Some("sway")),
+        NOW,
+    )
+    .unwrap();
+
+    // A record for a file `--claude-statusline` never patches, pointing its
+    // "backup" at something the user would badly miss.
+    let key = home.path("home/.ssh/id_ed25519");
+    std::fs::create_dir_all(key.parent().unwrap()).unwrap();
+    std::fs::write(&key, "PRIVATE KEY\n").unwrap();
+    let other = home.path("home/.claude/other.json");
+    std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+    std::fs::write(
+        &other,
+        r#"{"statusLine": {"type": "command", "command": "keep"}}"#,
+    )
+    .unwrap();
+
+    let manifest_path = Manifest::path(&home.env());
+    let mut manifest = manifest_of(&home);
+    manifest.claude = Some(ClaudeRecord {
+        settings: other.clone(),
+        backup: key.clone(),
+        previous: Some(serde_json::json!({"type": "command", "command": "theirs"})),
+        command: "keep".into(),
+    });
+    manifest.files.push(key.clone());
+    manifest.save(&manifest_path).unwrap();
+
+    let summary = integration::uninstall(&home.env(), &home.session(Some("sway"))).unwrap();
+    assert!(
+        key.exists(),
+        "a tampered backup must not delete $HOME files"
+    );
+    assert_eq!(std::fs::read_to_string(&key).unwrap(), "PRIVATE KEY\n");
+    assert_eq!(
+        std::fs::read_to_string(&other).unwrap(),
+        r#"{"statusLine": {"type": "command", "command": "keep"}}"#,
+        "and its statusLine is not rewritten either"
+    );
+    assert!(summary.contains("left both alone"), "{summary}");
 }
 
 #[test]

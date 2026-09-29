@@ -85,6 +85,7 @@ impl RolloutScanner {
                 seen.insert(key);
                 if let Some(min) = min_mtime {
                     if !self.files.contains_key(&key) && !is_recent(&path, min) {
+                        self.skip_file(&path, key, metadata.len());
                         continue;
                     }
                 }
@@ -96,6 +97,18 @@ impl RolloutScanner {
         out
     }
 
+    /// Record a file the first scan passed over as already read to the end.
+    ///
+    /// Only the first scan has an age filter; the next one has none, so a file
+    /// left unrecorded would be read from byte 0 — days of token events counted
+    /// again, and a weeks-old `rate_limits` line able to replace a snapshot the
+    /// live sources just produced.
+    fn skip_file(&mut self, path: &Path, key: (u64, u64), len: u64) {
+        let state = self.files.entry(key).or_default();
+        state.file_name = file_name_of(path);
+        state.offset = len;
+    }
+
     fn scan_file(
         &mut self,
         path: &Path,
@@ -104,12 +117,7 @@ impl RolloutScanner {
         now: i64,
         out: &mut ScanOutput,
     ) {
-        let file_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default()
-            .to_string();
-
+        let file_name = file_name_of(path);
         let state = self.files.entry(key).or_default();
         let truncated = !state.file_name.is_empty() && len < state.offset;
         if truncated {
@@ -151,6 +159,13 @@ impl RolloutScanner {
         }
         state.offset += consumed;
     }
+}
+
+fn file_name_of(path: &Path) -> String {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -471,25 +486,70 @@ mod tests {
         assert_eq!(out2.events[0].counts.input, 5);
     }
 
+    /// Set `path`'s mtime `days` into the past.
+    fn age_file(path: &Path, days: u64) {
+        let old = SystemTime::now() - Duration::from_secs(days * 86_400);
+        let file = fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.set_times(fs::FileTimes::new().set_modified(old))
+            .unwrap();
+    }
+
     #[test]
-    fn old_files_are_skipped_on_first_scan_only() {
+    fn a_file_the_first_scan_skipped_stays_skipped_afterwards() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sessions/rollout-old.jsonl");
         write_lines(
             &path,
             &[&token_count_line("2026-09-01T00:00:00Z", 10, 5, 0, 5, 0)],
         );
-        let old = SystemTime::now() - Duration::from_secs(20 * 86_400);
-        let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
-        file.set_times(fs::FileTimes::new().set_modified(old))
-            .unwrap();
+        age_file(&path, 20);
 
         let mut scanner = RolloutScanner::new();
-        let out = scanner.scan(&[dir.path().to_path_buf()], 0);
+        let first = scanner.scan(&[dir.path().to_path_buf()], 0);
         assert!(
-            out.events.is_empty(),
-            "old file must be skipped on first scan"
+            first.events.is_empty() && first.latest_rate_limits.is_none(),
+            "an old file must be skipped on the first scan"
         );
+
+        // Only the first scan filters on age, so a file left unrecorded would be
+        // read from byte 0 here: days of events counted again, and a weeks-old
+        // rate-limit line offered as the current one.
+        let second = scanner.scan(&[dir.path().to_path_buf()], 0);
+        assert!(second.events.is_empty(), "{:?}", second.events);
+        assert!(second.latest_rate_limits.is_none());
+    }
+
+    #[test]
+    fn an_old_file_that_is_appended_to_is_read_from_where_it_was_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions/rollout-woken.jsonl");
+        write_lines(
+            &path,
+            &[&token_count_line("2026-09-01T00:00:00Z", 10, 5, 0, 5, 0)],
+        );
+        age_file(&path, 20);
+
+        let mut scanner = RolloutScanner::new();
+        assert!(
+            scanner
+                .scan(&[dir.path().to_path_buf()], 0)
+                .events
+                .is_empty()
+        );
+
+        // The session is resumed: only what was added counts.
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(
+            file,
+            "{}",
+            token_count_line("2026-09-29T00:00:00Z", 60, 30, 0, 20, 0)
+        )
+        .unwrap();
+        drop(file);
+
+        let out = scanner.scan(&[dir.path().to_path_buf()], 0);
+        assert_eq!(out.events.len(), 1);
+        assert_eq!(out.events[0].counts.input, 30);
     }
 
     #[test]

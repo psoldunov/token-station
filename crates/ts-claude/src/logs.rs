@@ -418,4 +418,30 @@ mod tests {
         let events2 = scan(&[dir.path().to_path_buf()], &mut state, NOW);
         assert!(events2.is_empty());
     }
+
+    #[test]
+    fn a_transcript_older_than_the_lookback_stays_skipped_on_every_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let line = assistant_line("msg1", Some("req1"), "m", "2026-09-10T11:00:00Z");
+        let path = write_jsonl(dir.path(), "old.jsonl", &[line]);
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(20 * 86_400);
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(old))
+            .unwrap();
+
+        // The cutoff is taken from `now` on every pass, not just the first, so an
+        // old file is never picked up later and read from byte 0.
+        let mut state = LogScanState::default();
+        let now = unix_seconds_now();
+        assert!(scan(&[dir.path().to_path_buf()], &mut state, now).is_empty());
+        assert!(scan(&[dir.path().to_path_buf()], &mut state, now).is_empty());
+        assert!(state.files.is_empty(), "nothing was recorded for it either");
+    }
+
+    fn unix_seconds_now() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+    }
 }

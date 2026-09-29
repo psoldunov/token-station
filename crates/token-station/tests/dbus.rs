@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use token_station::backend::Backend;
+use token_station::backend::{Backend, SetSettingsError};
 use token_station::dbus::client::TokenStationProxy;
 use token_station::dbus::{BUS_NAME, OBJECT_PATH, service};
 use token_station::publish::Publisher;
@@ -46,8 +46,9 @@ impl Backend for FakeBackend {
             .to_json()
     }
 
-    async fn set_settings(&self, json: &str) -> Result<(), Vec<String>> {
-        let next = token_station::settings::parse_settings(json)?;
+    async fn set_settings(&self, json: &str) -> Result<(), SetSettingsError> {
+        let next =
+            token_station::settings::parse_settings(json).map_err(SetSettingsError::Rejected)?;
         *self.settings.lock().unwrap_or_else(|e| e.into_inner()) = next;
         Ok(())
     }

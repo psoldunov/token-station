@@ -1,7 +1,7 @@
 //! The live daemon: providers, config, history, alerts and the published snapshot.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use async_trait::async_trait;
 use ts_core::alerts::{self, Alert, AlertState};
@@ -11,7 +11,7 @@ use ts_core::pricing::SharedPricing;
 use ts_core::{Ingest, IngestError, Provider, ProviderId, ProviderSnapshot, ProviderState};
 
 use crate::atomic::{Fingerprint, fingerprint, modified_secs, write_atomic};
-use crate::backend::Backend;
+use crate::backend::{Backend, SetSettingsError};
 use crate::clock::Clock;
 use crate::daemon::providers;
 use crate::history::{HistoryHandle, OwnedSample};
@@ -26,6 +26,9 @@ pub const STATUSLINE_DROP_MAX_AGE_SECS: i64 = 10 * 60;
 
 /// Everything one running daemon owns.
 pub struct Daemon {
+    /// The `Arc` this daemon lives in, so work that outlives one method call can
+    /// be spawned. Weak, or the daemon would keep itself alive for ever.
+    me: Weak<Daemon>,
     pub paths: Paths,
     pub publisher: Arc<Publisher>,
     pricing: SharedPricing,
@@ -46,6 +49,9 @@ pub struct Daemon {
 
 impl Daemon {
     /// Assemble a daemon, building its providers from `config`.
+    ///
+    /// Blocking: building a provider reads the disk (`~/.claude/.credentials.json`,
+    /// `PATH`), so the daemon is only ever built on a blocking thread.
     pub fn new(
         paths: Paths,
         config: Config,
@@ -72,7 +78,8 @@ impl Daemon {
         let snapshots = collect(&providers, now);
         let publisher = Publisher::new(assemble(1, now, &snapshots, &config));
         let alert_state = load_alert_state(&paths.alerts_file());
-        Arc::new(Daemon {
+        Arc::new_cyclic(|me| Daemon {
+            me: me.clone(),
             config_stamp: Mutex::new(fingerprint(&paths.config_file)),
             apply_lock: tokio::sync::Mutex::new(()),
             paths,
@@ -253,28 +260,72 @@ impl Daemon {
 
     /// Adopt `next`, rebuilding only what its differences require.
     ///
-    /// Serialised, so two `SetSettings` calls cannot interleave a rebuild with a
-    /// store and leave the providers built from a config nobody kept.
-    pub async fn apply_config(&self, next: Config, persist: bool) -> Result<(), String> {
-        let _serialised = self.apply_lock.lock().await;
-        let change = settings::diff(&self.config(), &next);
-        if change.is_empty() {
-            return Ok(());
-        }
-        if persist {
-            settings::persist(&next, &self.paths.config_file)?;
-            *lock(&self.config_stamp) = fingerprint(&self.paths.config_file);
-        }
-        let rebuilt = self.rebuild_providers(&next, change);
-        *write(&self.config) = next;
-        if change.needs_republish() {
-            self.republish().await;
-        }
-        self.fill_in(&rebuilt).await;
-        if change.pricing {
-            self.refresh_pricing().await;
-        }
+    /// Two steps. Everything a caller has to see before its call returns — the
+    /// write, the swap, the rebuild, the republish — happens under `apply_lock`, so
+    /// two `SetSettings` calls cannot interleave a rebuild with a store and leave
+    /// the providers built from a config nobody kept. Reading the rebuilt providers
+    /// and refreshing prices then happens on its own task, after the lock is
+    /// released: both talk to the network, and a `SetSettings` reply that waits for
+    /// them arrives after the caller's own D-Bus timeout has expired.
+    pub async fn apply_config(&self, next: Config, persist: bool) -> Result<(), SetSettingsError> {
+        let (rebuilt, pricing) = {
+            let _serialised = self.apply_lock.lock().await;
+            let change = settings::diff(&self.config(), &next);
+            if change.is_empty() {
+                return Ok(());
+            }
+            if persist {
+                self.persist_config(&next).await?;
+            }
+            let rebuilt = self.rebuild_providers(&next, change).await;
+            *write(&self.config) = next;
+            if change.needs_republish() {
+                self.republish().await;
+            }
+            (rebuilt, change.pricing)
+        };
+        self.spawn_fill_in(rebuilt, pricing);
         Ok(())
+    }
+
+    /// Write `next` to `config.toml`, off the runtime's threads: the write fsyncs.
+    async fn persist_config(&self, next: &Config) -> Result<(), SetSettingsError> {
+        let path = self.paths.config_file.clone();
+        let config = next.clone();
+        let written = tokio::task::spawn_blocking(move || {
+            settings::persist(&config, &path).map(|()| fingerprint(&path))
+        })
+        .await;
+        match written {
+            Ok(Ok(stamp)) => {
+                *lock(&self.config_stamp) = stamp;
+                Ok(())
+            }
+            Ok(Err(error)) => Err(error.into()),
+            Err(error) => Err(SetSettingsError::Failed(format!(
+                "the settings write did not run: {error}"
+            ))),
+        }
+    }
+
+    /// Read the rebuilt providers and refresh prices, once the caller has its reply.
+    fn spawn_fill_in(&self, rebuilt: Vec<ProviderId>, pricing: bool) {
+        if rebuilt.is_empty() && !pricing {
+            return;
+        }
+        let Some(daemon) = self.me.upgrade() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            tracing::debug!("no runtime: nothing to fill in after the settings change");
+            return;
+        };
+        runtime.spawn(async move {
+            daemon.fill_in(&rebuilt).await;
+            if pricing {
+                daemon.refresh_pricing().await;
+            }
+        });
     }
 
     /// A rebuilt provider starts out `Loading`; read it now rather than leaving a
@@ -299,7 +350,15 @@ impl Daemon {
     }
 
     /// Replace the providers whose settings changed; returns which ones moved.
-    fn rebuild_providers(&self, next: &Config, change: settings::ConfigChange) -> Vec<ProviderId> {
+    ///
+    /// Built on a blocking thread and only then swapped in: constructing a provider
+    /// reads credentials and walks `PATH`, which belongs neither on a runtime
+    /// thread nor inside the `providers` write lock every `snapshot()` needs.
+    async fn rebuild_providers(
+        &self,
+        next: &Config,
+        change: settings::ConfigChange,
+    ) -> Vec<ProviderId> {
         let rebuild: Vec<ProviderId> = [
             (ProviderId::Claude, change.claude),
             (ProviderId::Codex, change.codex),
@@ -310,12 +369,29 @@ impl Daemon {
         if rebuild.is_empty() {
             return rebuild;
         }
-        let mut providers = write(&self.providers);
-        for id in &rebuild {
-            tracing::info!(provider = %id, "rebuilding provider after a settings change");
-            providers.insert(*id, providers::build_one(*id, next, &self.pricing));
+        let (config, pricing, ids) = (next.clone(), self.pricing(), rebuild.clone());
+        let built = tokio::task::spawn_blocking(move || {
+            ids.into_iter()
+                .map(|id| {
+                    tracing::info!(provider = %id, "rebuilding provider after a settings change");
+                    (id, providers::build_one(id, &config, &pricing))
+                })
+                .collect::<Vec<_>>()
+        })
+        .await;
+        match built {
+            Ok(built) => {
+                let mut providers = write(&self.providers);
+                for (id, provider) in built {
+                    providers.insert(id, provider);
+                }
+                rebuild
+            }
+            Err(error) => {
+                tracing::warn!(%error, "the provider rebuild did not run");
+                Vec::new()
+            }
         }
-        rebuild
     }
 
     /// Forward a statusline payload to the Claude provider as seen at `observed_at`.
@@ -355,14 +431,31 @@ impl Daemon {
             }
             *seen = Some(modified);
         }
-        match std::fs::read_to_string(&path) {
-            Ok(payload) => match self.ingest_statusline(&payload, modified) {
+        // Off the runtime's threads: the drop box is a file in the runtime
+        // directory, but this runs on the tokens tick and a read is a read.
+        match tokio::task::spawn_blocking(move || std::fs::read_to_string(&path)).await {
+            Ok(Ok(payload)) => match self.ingest_statusline(&payload, modified) {
                 Ok(()) => {
                     self.republish().await;
                 }
                 Err(error) => tracing::warn!(%error, "dropped statusline file was rejected"),
             },
-            Err(error) => tracing::warn!(%error, "cannot read the dropped statusline file"),
+            Ok(Err(error)) => tracing::warn!(%error, "cannot read the dropped statusline file"),
+            Err(error) => tracing::warn!(%error, "the statusline file read did not run"),
+        }
+    }
+
+    /// Fold the downloaded price table on disk over the bundled one.
+    ///
+    /// Deliberately not part of building the daemon: that happens before the bus
+    /// name is claimed, and a daemon that then loses the race should have read
+    /// nothing at all.
+    pub async fn merge_pricing_cache(&self) {
+        let cache = self.paths.pricing_cache();
+        match tokio::task::spawn_blocking(move || pricing_refresh::load_cache(&cache)).await {
+            Ok(Some(cached)) => pricing_refresh::install(&self.pricing(), &cached),
+            Ok(None) => {}
+            Err(error) => tracing::warn!(%error, "the pricing cache read did not run"),
         }
     }
 }
@@ -383,9 +476,9 @@ impl Backend for Daemon {
         self.config().to_json()
     }
 
-    async fn set_settings(&self, json: &str) -> Result<(), Vec<String>> {
-        let next = settings::parse_settings(json)?;
-        self.apply_config(next, true).await.map_err(|e| vec![e])
+    async fn set_settings(&self, json: &str) -> Result<(), SetSettingsError> {
+        let next = settings::parse_settings(json).map_err(SetSettingsError::Rejected)?;
+        self.apply_config(next, true).await
     }
 
     async fn ingest_claude_statusline(&self, payload: &str) -> Result<(), String> {

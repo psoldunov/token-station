@@ -7,9 +7,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::integration::Dirs;
 use crate::integration::step::Step;
 use crate::integration::systemd::UNIT;
+use crate::integration::{Dirs, quoting};
 
 /// File name, which must match the bus name.
 pub const SERVICE_FILE: &str = "dev.soldunov.TokenStation.service";
@@ -25,9 +25,18 @@ pub fn service_path(dirs: &Dirs) -> PathBuf {
 /// The `SystemdService=` key, written exactly once.
 const SYSTEMD_KEY: &str = "SystemdService=";
 
+/// Quote one word of the `Exec=` line; see [`quoting::DBUS`].
+///
+/// Deliberately not systemd's quoting: `dbus-daemon` has no specifiers, so a `%`
+/// doubled for systemd's benefit would be passed through as two per-cent signs and
+/// the activation would fail on any path containing one.
+pub fn quote_exec(value: &str) -> String {
+    quoting::quoted(value, &quoting::DBUS)
+}
+
 /// The activation file for `exec`.
 pub fn service_text(exec: &Path) -> String {
-    let quoted = crate::integration::systemd::quote_word(&exec.to_string_lossy());
+    let quoted = quote_exec(&exec.to_string_lossy());
     let mut text = TEMPLATE.replace(BINDIR_PLACEHOLDER, &quoted);
     if !text.ends_with('\n') {
         text.push('\n');
@@ -88,6 +97,19 @@ mod tests {
             "{text}"
         );
         assert!(text.contains(&format!("{SYSTEMD_KEY}{UNIT}")), "{text}");
+    }
+
+    /// `dbus-daemon` reads this line itself when the session has no systemd, and it
+    /// expands nothing: the `%` and `$` systemd would want doubled must reach the
+    /// file exactly as the path spells them, or the daemon never starts.
+    /// [`quoting`](crate::integration::quoting) round-trips the rules themselves.
+    #[test]
+    fn the_exec_line_does_not_use_systemds_escaping() {
+        let text = service_text(Path::new("/apps/50% $x \"off\".AppImage"));
+        assert!(
+            text.contains(r#"Exec="/apps/50% $x \"off\".AppImage" daemon"#),
+            "{text}"
+        );
     }
 
     #[test]

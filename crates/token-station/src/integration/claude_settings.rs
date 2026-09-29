@@ -31,6 +31,13 @@ pub struct Plan {
     pub command: String,
 }
 
+/// The copy taken next to `settings` before the first patch.
+pub fn backup_path(settings: &Path) -> PathBuf {
+    let mut backup = settings.as_os_str().to_os_string();
+    backup.push(BACKUP_SUFFIX);
+    PathBuf::from(backup)
+}
+
 /// `$CLAUDE_CONFIG_DIR/settings.json`, else `~/.claude/settings.json`.
 pub fn settings_path(env: &Env, config_dir: Option<&str>) -> PathBuf {
     match config_dir.map(str::trim).filter(|dir| !dir.is_empty()) {
@@ -172,11 +179,9 @@ pub fn plan(settings: &Path, exec: &Path) -> anyhow::Result<Plan> {
         Some(inner) => inner,
         None => previous,
     };
-    let mut backup = settings.as_os_str().to_os_string();
-    backup.push(BACKUP_SUFFIX);
     Ok(Plan {
         settings: settings.to_path_buf(),
-        backup: PathBuf::from(backup),
+        backup: backup_path(settings),
         command: build_command(exec, wrapped.as_deref()),
     })
 }
@@ -197,6 +202,32 @@ fn raw(value: &Value) -> anyhow::Result<Box<RawValue>> {
     Ok(RawValue::from_string(serde_json::to_string(value)?)?)
 }
 
+/// What `uninstall` should put back once this patch is applied.
+///
+/// When the status line is already ours but no manifest says what it replaced (the
+/// state directory was cleared, say), our own command is the one thing that must
+/// never be stored: `uninstall` would then "restore" Token Station's own status
+/// line and the user would be left with it forever. The command we wrap is the
+/// best record of what was there before, and nothing at all is the honest answer
+/// when we wrap nothing.
+fn previous_value(
+    members: &Members,
+    was_ours: bool,
+    recorded: Option<&ClaudeRecord>,
+) -> Option<Value> {
+    match (was_ours, recorded) {
+        (true, Some(record)) => record.previous.clone(),
+        (true, None) => wrapped_command(members)
+            .map(|inner| serde_json::json!({ "type": "command", "command": inner })),
+        (false, _) => status_line(members),
+    }
+}
+
+/// The command our own status line wraps, if it is ours and it wraps one.
+fn wrapped_command(members: &Members) -> Option<String> {
+    parse_ours(&current_command(members)?).flatten()
+}
+
 /// Apply the patch. `recorded` is the manifest entry from an earlier run, whose
 /// `previous` value survives every re-run.
 pub fn apply(plan: &Plan, recorded: Option<&ClaudeRecord>) -> anyhow::Result<ClaudeRecord> {
@@ -210,10 +241,7 @@ pub fn apply(plan: &Plan, recorded: Option<&ClaudeRecord>) -> anyhow::Result<Cla
         std::fs::copy(&plan.settings, &plan.backup)
             .with_context(|| format!("cannot back up {}", plan.settings.display()))?;
     }
-    let previous = match (was_ours, recorded) {
-        (true, Some(record)) => record.previous.clone(),
-        _ => status_line(&members),
-    };
+    let previous = previous_value(&members, was_ours, recorded);
 
     members.insert(
         "statusLine".into(),
@@ -499,6 +527,35 @@ mod tests {
         .unwrap();
         assert!(!restore(&record).unwrap());
         assert_eq!(read(&path)["statusLine"]["command"], "mine now");
+    }
+
+    #[test]
+    fn our_own_command_is_never_stored_as_the_thing_to_restore() {
+        // A re-run with no manifest left (the state directory was cleared): the
+        // wrapped command is what `uninstall` must put back, never our own.
+        let ours = "'/opt/TokenStation.AppImage' statusline --wrap 'starship'";
+        let (_dir, wrapping) = settings_with(&format!(
+            r#"{{"statusLine": {{"type": "command", "command": {}}}}}"#,
+            serde_json::to_string(ours).unwrap()
+        ));
+        let record = apply(&plan(&wrapping, Path::new(EXEC)).unwrap(), None).unwrap();
+        assert_eq!(
+            record.previous,
+            Some(serde_json::json!({"type": "command", "command": "starship"}))
+        );
+        assert!(restore(&record).unwrap());
+        assert_eq!(read(&wrapping)["statusLine"]["command"], "starship");
+
+        // And with nothing wrapped, there is nothing to put back.
+        let bare = "'/opt/TokenStation.AppImage' statusline";
+        let (_dir2, plain) = settings_with(&format!(
+            r#"{{"statusLine": {{"type": "command", "command": {}}}}}"#,
+            serde_json::to_string(bare).unwrap()
+        ));
+        let record = apply(&plan(&plain, Path::new(EXEC)).unwrap(), None).unwrap();
+        assert_eq!(record.previous, None);
+        assert!(restore(&record).unwrap());
+        assert!(read(&plain).get("statusLine").is_none());
     }
 
     #[test]

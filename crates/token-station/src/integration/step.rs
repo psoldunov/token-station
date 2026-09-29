@@ -24,6 +24,18 @@ pub enum Step {
     CopyFile { source: PathBuf, target: PathBuf },
     /// Write a generated file.
     Write { target: PathBuf, contents: String },
+    /// Write the systemd user unit and, only if that write actually landed, carry
+    /// out `then` (the `daemon-reload` and `enable --now` that load it).
+    ///
+    /// Nested rather than three steps in a row because the unit is the one file
+    /// whose write decides whether anything else may happen: when a packaged or
+    /// home-manager-linked unit is left in charge, `enable --now` would start a
+    /// unit we do not own and `uninstall` would later `disable --now` it.
+    Unit {
+        target: PathBuf,
+        contents: String,
+        then: Vec<Step>,
+    },
     /// Run a command and wait; a failure is a warning, not an error.
     Run { program: PathBuf, args: Vec<String> },
     /// Start a command and do not wait for it.
@@ -49,7 +61,9 @@ impl Step {
             Step::CopyFile { source, target } => {
                 format!("install {} → {}", source.display(), target.display())
             }
-            Step::Write { target, .. } => format!("write {}", target.display()),
+            Step::Write { target, .. } | Step::Unit { target, .. } => {
+                format!("write {}", target.display())
+            }
             Step::Run { program, args } => format!("run {}", command_line(program, args)),
             Step::Spawn { program, args } => format!("start {}", command_line(program, args)),
             Step::StopTray { .. } => format!("stop the tray on {}", tray::TRAY_BUS_NAME),
@@ -60,6 +74,26 @@ impl Step {
             ),
             Step::Note(text) => text.clone(),
         }
+    }
+
+    /// Does this step create something the manifest has to record?
+    fn writes_to_disk(&self) -> bool {
+        matches!(
+            self,
+            Step::CopyTree { .. } | Step::CopyFile { .. } | Step::Write { .. } | Step::Unit { .. }
+        )
+    }
+
+    /// This step and everything nested inside it, in the order they run.
+    ///
+    /// `--dry-run` prints the flattened list: the follow-up commands are part of
+    /// what `setup` would do, and hiding them behind one line would understate it.
+    pub fn flattened(&self) -> Vec<&Step> {
+        let mut out = vec![self];
+        if let Step::Unit { then, .. } = self {
+            out.extend(then.iter().flat_map(Step::flattened));
+        }
+        out
     }
 }
 
@@ -92,45 +126,130 @@ impl Outcome {
 ///
 /// A target that is already there and was not installed by us is skipped with a
 /// warning rather than replaced; see [`existing`].
+///
+/// `journal` is where the manifest is written after every step that ran. Losing
+/// power (or being killed) halfway through leaves a manifest describing exactly
+/// what is on disk, which is what `uninstall` needs to undo it; `None` keeps
+/// nothing, which is what `uninstall`'s own stop steps want.
 pub fn execute(
     steps: &[Step],
     manifest: &mut Manifest,
     previous: Previous<'_>,
+    journal: Option<&Path>,
 ) -> anyhow::Result<Outcome> {
     let mut outcome = Outcome::default();
+    run_steps(steps, manifest, previous, journal, &mut outcome)?;
+    Ok(outcome)
+}
+
+fn run_steps(
+    steps: &[Step],
+    manifest: &mut Manifest,
+    previous: Previous<'_>,
+    journal: Option<&Path>,
+    outcome: &mut Outcome,
+) -> anyhow::Result<()> {
     for step in steps {
-        match step {
-            Step::CopyTree { source, target } => {
-                if may_write(target, previous, &mut outcome) {
-                    copy_tree(source, target)?;
-                    manifest.add_dir(target);
-                }
-            }
-            Step::CopyFile { source, target } => {
-                if may_write(target, previous, &mut outcome) {
-                    copy_file(source, target)?;
-                    manifest.add_file(target);
-                }
-            }
-            Step::Write { target, contents } => {
-                if may_write(target, previous, &mut outcome) {
-                    write_atomic(target, contents.as_bytes())
-                        .with_context(|| format!("cannot write {}", target.display()))?;
-                    manifest.add_file(target);
-                }
-            }
-            Step::Run { program, args } => run(program, args, &mut outcome),
-            Step::Spawn { program, args } => spawn(program, args, &mut outcome),
-            Step::StopTray { bus_address } => stop_tray(bus_address.as_deref(), &mut outcome),
-            Step::Statusline(plan) => {
-                let record = claude_settings::apply(plan, previous.claude)?;
-                manifest.add_file(&record.backup);
-                manifest.claude = Some(record);
-            }
-            Step::Note(text) => outcome.notes.push(text.clone()),
+        run_step(step, manifest, previous, journal, outcome)?;
+        record(manifest, journal, outcome);
+    }
+    Ok(())
+}
+
+/// The steps that put something on disk, each recorded only once it landed.
+///
+/// Split from [`run_other_step`] because every one of these shares the same
+/// shape — ask [`may_write`], write, record — and reading that shape once is
+/// easier than reading it four times interleaved with the commands.
+fn run_disk_step(
+    step: &Step,
+    manifest: &mut Manifest,
+    previous: Previous<'_>,
+    journal: Option<&Path>,
+    outcome: &mut Outcome,
+) -> anyhow::Result<()> {
+    match step {
+        Step::CopyTree { source, target } if may_write(target, previous, outcome) => {
+            copy_tree(source, target)?;
+            manifest.add_dir(target);
+        }
+        Step::CopyFile { source, target } if may_write(target, previous, outcome) => {
+            copy_file(source, target)?;
+            manifest.add_file(target);
+        }
+        Step::Write { target, contents } if may_write(target, previous, outcome) => {
+            write(target, contents)?;
+            manifest.add_file(target);
+        }
+        Step::Unit {
+            target,
+            contents,
+            then,
+        } if may_write(target, previous, outcome) => {
+            write(target, contents)?;
+            manifest.add_file(target);
+            // Recorded only now: `uninstall` reads this to decide whether it may
+            // stop and disable the unit, and it may only do that to a unit this
+            // run wrote itself.
+            manifest.systemd_unit = Some(target.clone());
+            run_steps(then, manifest, previous, journal, outcome)?;
+        }
+        // Either refused (the warning is already recorded) or not a disk step.
+        _ => {}
+    }
+    Ok(())
+}
+
+/// The steps that run something or say something.
+fn run_other_step(
+    step: &Step,
+    manifest: &mut Manifest,
+    previous: Previous<'_>,
+    outcome: &mut Outcome,
+) -> anyhow::Result<()> {
+    match step {
+        Step::Run { program, args } => run(program, args, outcome),
+        Step::Spawn { program, args } => spawn(program, args, outcome),
+        Step::StopTray { bus_address } => stop_tray(bus_address.as_deref(), outcome),
+        Step::Statusline(plan) => {
+            let record = claude_settings::apply(plan, previous.claude)?;
+            manifest.add_file(&record.backup);
+            manifest.claude = Some(record);
+        }
+        Step::Note(text) => outcome.notes.push(text.clone()),
+        // Handled by `run_disk_step`.
+        _ => {}
+    }
+    Ok(())
+}
+
+fn run_step(
+    step: &Step,
+    manifest: &mut Manifest,
+    previous: Previous<'_>,
+    journal: Option<&Path>,
+    outcome: &mut Outcome,
+) -> anyhow::Result<()> {
+    if step.writes_to_disk() {
+        return run_disk_step(step, manifest, previous, journal, outcome);
+    }
+    run_other_step(step, manifest, previous, outcome)
+}
+
+fn write(target: &Path, contents: &str) -> anyhow::Result<()> {
+    write_atomic(target, contents.as_bytes())
+        .with_context(|| format!("cannot write {}", target.display()))
+}
+
+/// Keep the on-disk manifest level with what has actually been installed.
+fn record(manifest: &Manifest, journal: Option<&Path>, outcome: &mut Outcome) {
+    let Some(path) = journal else { return };
+    if let Err(error) = manifest.save(path) {
+        let warning = format!("cannot update {}: {error}", path.display());
+        if !outcome.warnings.contains(&warning) {
+            outcome.warnings.push(warning);
         }
     }
-    Ok(outcome)
 }
 
 /// May `target` be replaced? A refusal is recorded as a warning, not an error: the
@@ -170,7 +289,21 @@ fn copy_tree(source: &Path, target: &Path) -> anyhow::Result<()> {
         .with_context(|| format!("cannot copy {} to {}", source.display(), target.display()))
 }
 
+/// Take a symlink out of the way, so what follows replaces the link itself.
+///
+/// [`existing::verdict`] has already decided we own this path, but a copy writes
+/// *through* a link: `std::fs::copy` and `create_dir_all` both follow it, so
+/// installing over a link the user made (with `--force`, or one an earlier run
+/// recorded) would rewrite whatever it points at instead.
+fn unlink_if_symlink(path: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => std::fs::remove_file(path),
+        _ => Ok(()),
+    }
+}
+
 fn copy_into(source: &Path, target: &Path) -> std::io::Result<()> {
+    unlink_if_symlink(target)?;
     std::fs::create_dir_all(target)?;
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
@@ -178,6 +311,7 @@ fn copy_into(source: &Path, target: &Path) -> std::io::Result<()> {
         if entry.file_type()?.is_dir() {
             copy_into(&entry.path(), &to)?;
         } else {
+            unlink_if_symlink(&to)?;
             std::fs::copy(entry.path(), &to)?;
         }
     }
@@ -188,8 +322,8 @@ fn copy_file(source: &Path, target: &Path) -> anyhow::Result<()> {
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::copy(source, target)
-        .with_context(|| format!("cannot copy {} to {}", source.display(), target.display()))?;
+    let copy = unlink_if_symlink(target).and_then(|()| std::fs::copy(source, target));
+    copy.with_context(|| format!("cannot copy {} to {}", source.display(), target.display()))?;
     Ok(())
 }
 
@@ -241,7 +375,15 @@ mod tests {
 
     /// Run `steps` on a fresh install with nothing recorded before it.
     fn fresh(steps: &[Step], manifest: &mut Manifest) -> Outcome {
-        execute(steps, manifest, Previous::default()).expect("the plan runs")
+        execute(steps, manifest, Previous::default(), None).expect("the plan runs")
+    }
+
+    /// `Previous` that recorded `owned` and nothing else.
+    fn owning(owned: &[PathBuf]) -> Previous<'_> {
+        Previous {
+            owned,
+            ..Previous::default()
+        }
     }
 
     /// Create `base/sub` and write each `(relative_path, contents)` pair into it.
@@ -401,10 +543,8 @@ mod tests {
                 contents: "[Unit]\n# new\n".into(),
             }],
             &mut manifest,
-            Previous {
-                owned: &owned,
-                ..Previous::default()
-            },
+            owning(&owned),
+            None,
         )
         .unwrap();
 
@@ -432,6 +572,7 @@ mod tests {
                 force: true,
                 ..Previous::default()
             },
+            None,
         )
         .unwrap();
 
@@ -466,6 +607,143 @@ mod tests {
         assert!(manifest.dirs.is_empty());
     }
 
+    /// The unit step as `setup` builds it: a write plus the two systemctl calls.
+    fn unit_step(target: &Path, tool: &Path) -> Step {
+        Step::Unit {
+            target: target.to_path_buf(),
+            contents: "[Unit]\n".into(),
+            then: vec![Step::Run {
+                program: tool.to_path_buf(),
+                args: vec!["--user".into(), "daemon-reload".into()],
+            }],
+        }
+    }
+
+    #[test]
+    fn the_unit_is_recorded_and_loaded_only_when_its_write_landed() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("token-station.service");
+
+        let mut manifest = manifest();
+        let tool = dir.path().join("systemctl");
+        let outcome = fresh(&[unit_step(&target, &tool)], &mut manifest);
+
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "[Unit]\n");
+        assert_eq!(manifest.systemd_unit, Some(target.clone()));
+        assert_eq!(manifest.files, vec![target]);
+        assert_eq!(outcome.ran.len(), 1, "systemctl was called: {outcome:?}");
+    }
+
+    #[test]
+    fn a_unit_somebody_else_owns_is_neither_recorded_nor_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("token-station.service");
+        std::os::unix::fs::symlink("/nix/store/abc-token-station/unit", &target).unwrap();
+
+        let mut manifest = manifest();
+        let outcome = fresh(
+            &[unit_step(&target, &dir.path().join("systemctl"))],
+            &mut manifest,
+        );
+
+        assert_eq!(manifest.systemd_unit, None, "we do not own it");
+        assert!(manifest.files.is_empty());
+        assert!(
+            outcome.ran.is_empty(),
+            "systemctl must not run: {outcome:?}"
+        );
+        assert_eq!(outcome.warnings.len(), 1);
+    }
+
+    #[test]
+    fn the_manifest_is_written_after_every_step_that_ran() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join("state/install-manifest.json");
+        let first = dir.path().join("first.service");
+        let second = dir.path().join("second.desktop");
+
+        let mut manifest = manifest();
+        execute(
+            &[
+                Step::Write {
+                    target: first.clone(),
+                    contents: "a".into(),
+                },
+                // Reading the journal from inside the run is the only way to see
+                // the intermediate state, so the second step does the reading.
+                Step::Write {
+                    target: second.clone(),
+                    contents: "b".into(),
+                },
+            ],
+            &mut manifest,
+            Previous::default(),
+            Some(&journal),
+        )
+        .unwrap();
+
+        let written = Manifest::load(&journal).expect("a manifest was journalled");
+        assert_eq!(written.files, vec![first, second]);
+    }
+
+    #[test]
+    fn a_copy_replaces_a_symlink_instead_of_writing_through_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("icon.svg");
+        std::fs::write(&source, "<svg/>").unwrap();
+        // What the user's dotfiles put there, and what must survive untouched.
+        let elsewhere = dir.path().join("their-icon.svg");
+        std::fs::write(&elsewhere, "theirs").unwrap();
+        let target = dir.path().join("data/icons/icon.svg");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &target).unwrap();
+        let owned = vec![target.clone()];
+
+        let mut manifest = manifest();
+        execute(
+            &[Step::CopyFile {
+                source,
+                target: target.clone(),
+            }],
+            &mut manifest,
+            owning(&owned),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(std::fs::read_to_string(&elsewhere).unwrap(), "theirs");
+        assert!(!std::fs::symlink_metadata(&target).unwrap().is_symlink());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "<svg/>");
+    }
+
+    #[test]
+    fn a_copied_tree_replaces_a_symlinked_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir_with_files(dir.path(), "payload", &[("metadata.json", "{}")]);
+        let elsewhere = dir_with_files(dir.path(), "theirs", &[("keep.qml", "theirs")]);
+        let target = dir.path().join("data/plasmoids/dev.soldunov.tokenstation");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &target).unwrap();
+        let owned = vec![target.clone()];
+
+        let mut manifest = manifest();
+        execute(
+            &[Step::CopyTree {
+                source,
+                target: target.clone(),
+            }],
+            &mut manifest,
+            owning(&owned),
+            None,
+        )
+        .unwrap();
+
+        assert!(elsewhere.join("keep.qml").exists(), "their tree survives");
+        assert!(!elsewhere.join("metadata.json").exists());
+        assert!(!std::fs::symlink_metadata(&target).unwrap().is_symlink());
+        assert!(target.join("metadata.json").exists());
+    }
+
     #[test]
     fn every_step_describes_itself_for_the_dry_run() {
         let described = Step::CopyTree {
@@ -483,5 +761,22 @@ mod tests {
             "run /bin/systemctl --user daemon-reload"
         );
         assert_eq!(Step::Note("hello".into()).describe(), "hello");
+    }
+
+    #[test]
+    fn a_nested_unit_step_flattens_into_the_lines_it_would_run() {
+        let step = unit_step(
+            Path::new("/cfg/token-station.service"),
+            Path::new("/bin/sc"),
+        );
+        let lines: Vec<String> = step.flattened().iter().map(|s| s.describe()).collect();
+        assert_eq!(
+            lines,
+            vec![
+                "write /cfg/token-station.service",
+                "run /bin/sc --user daemon-reload",
+            ]
+        );
+        assert_eq!(Step::Note("x".into()).flattened().len(), 1);
     }
 }

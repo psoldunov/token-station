@@ -12,6 +12,12 @@ pub const MIN_LIMITS_INTERVAL_SECS: u64 = 120;
 pub const MIN_TOKENS_INTERVAL_SECS: u64 = 15;
 pub const MIN_CLAUDE_ENDPOINT_INTERVAL_SECS: u64 = 120;
 
+/// Ceiling on the plan-limit interval: a day, which is what every front end's
+/// slider stops at. A hand-written `config.toml` may not go past it either, or the
+/// next save from a front end would quietly clamp a value the user chose on
+/// purpose and never say so.
+pub const MAX_LIMITS_INTERVAL_SECS: u64 = 86_400;
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -232,9 +238,11 @@ impl Config {
     fn problems(&self) -> Vec<String> {
         let mut out = Vec::new();
         let g = &self.general;
-        if g.limits_interval_secs < MIN_LIMITS_INTERVAL_SECS {
+        if !(MIN_LIMITS_INTERVAL_SECS..=MAX_LIMITS_INTERVAL_SECS).contains(&g.limits_interval_secs)
+        {
             out.push(format!(
-                "general.limits_interval_secs must be >= {MIN_LIMITS_INTERVAL_SECS}"
+                "general.limits_interval_secs must be \
+                 {MIN_LIMITS_INTERVAL_SECS}..={MAX_LIMITS_INTERVAL_SECS}"
             ));
         }
         if g.tokens_interval_secs < MIN_TOKENS_INTERVAL_SECS {
@@ -326,6 +334,24 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("limits_interval_secs"), "{msg}");
         assert!(msg.contains("must not exceed"), "{msg}");
+    }
+
+    #[test]
+    fn the_limits_interval_is_bounded_at_both_ends() {
+        let with = |secs: u64| {
+            let mut cfg = Config::default();
+            cfg.general.limits_interval_secs = secs;
+            cfg.validated()
+        };
+        // Every front end's slider stops at a day; a longer hand-written value
+        // would be silently clamped the next time one of them saves.
+        assert!(with(MAX_LIMITS_INTERVAL_SECS).is_ok());
+        assert!(with(MIN_LIMITS_INTERVAL_SECS).is_ok());
+        for out_of_range in [MIN_LIMITS_INTERVAL_SECS - 1, MAX_LIMITS_INTERVAL_SECS + 1] {
+            let msg = with(out_of_range).unwrap_err().to_string();
+            assert!(msg.contains("limits_interval_secs"), "{msg}");
+            assert!(msg.contains("86400"), "{msg}");
+        }
     }
 
     #[test]

@@ -8,7 +8,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
-use ts_codex::{CodexEnv, CodexProvider};
+use ts_codex::{CodexEnv, CodexProvider, HttpTimeouts};
 use ts_core::Provider;
 use ts_core::config::{CodexConfig, CodexProcessMode};
 use ts_core::discovery::SearchEnv;
@@ -79,6 +79,7 @@ fn base_env(dir: &Path, binary: PathBuf) -> CodexEnv {
         codex_home: None,
         binary_override: Some(binary),
         http_base_url: "http://127.0.0.1:1".to_string(), // unused unless a test overrides it
+        http_timeouts: HttpTimeouts::default(),
         search: SearchEnv {
             path: None,
             home: dir.to_path_buf(),
@@ -138,6 +139,7 @@ async fn not_installed_when_no_binary_and_no_home() {
         codex_home: None,
         binary_override: None,
         http_base_url: "http://127.0.0.1:1".into(),
+        http_timeouts: HttpTimeouts::default(),
         search: SearchEnv {
             path: Some(String::new()),
             home: dir.path().to_path_buf(),

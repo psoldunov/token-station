@@ -73,13 +73,10 @@ pub fn detect(current: Option<&str>) -> Desktop {
         .unwrap_or_default()
 }
 
-/// Quote one `Exec=` argument the way the Desktop Entry spec asks for.
-///
-/// Inside the double quotes a backslash, a double quote, a backtick and a dollar
-/// sign each need an extra backslash, and a literal per-cent sign is written `%%`
-/// so it is not read as a field code.
+/// Quote one `Exec=` argument the way the Desktop Entry spec asks for; see
+/// [`quoting::DESKTOP`] for the two levels of escaping it wants.
 pub fn quote_exec(value: &str) -> String {
-    quoting::quoted(value, &quoting::DESKTOP_ESCAPED)
+    quoting::quoted(value, &quoting::DESKTOP)
 }
 
 /// Replace the `Exec=` line with the real binary and `args`.
@@ -181,7 +178,12 @@ mod tests {
     #[test]
     fn exec_quoting_follows_the_desktop_entry_spec() {
         assert_eq!(quote_exec("/opt/Token Station"), "\"/opt/Token Station\"");
-        assert_eq!(quote_exec(r#"/opt/we"ird`$\x"#), r#""/opt/we\"ird\`\$\\x""#);
+        // Two levels: `\"` for the command line, and the backslash escaped again
+        // for the string unescaping the `.desktop` reader does first.
+        assert_eq!(
+            quote_exec(r#"/opt/we"ird`$\x"#),
+            r#""/opt/we\\"ird\\`\\$\\\\x""#
+        );
         // A per-cent sign would otherwise be read as a field code.
         assert_eq!(quote_exec("/opt/100%.AppImage"), "\"/opt/100%%.AppImage\"");
     }
@@ -194,7 +196,7 @@ mod tests {
             "tray",
         );
         assert!(
-            rewritten.contains(r#"Exec="/apps/Token \"Station\" 100%%.AppImage" tray"#),
+            rewritten.contains(r#"Exec="/apps/Token \\"Station\\" 100%%.AppImage" tray"#),
             "{rewritten}"
         );
     }

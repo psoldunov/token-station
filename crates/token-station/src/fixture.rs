@@ -12,7 +12,7 @@ use ts_core::assemble::assemble;
 use ts_core::config::Config;
 use ts_core::{ProviderId, Snapshot};
 
-use crate::backend::Backend;
+use crate::backend::{Backend, SetSettingsError};
 use crate::clock::Clock;
 use crate::publish::Publisher;
 use crate::settings;
@@ -171,8 +171,8 @@ impl Backend for FixturePlayer {
     }
 
     /// Applied in memory only: fixture mode never writes the user's config.
-    async fn set_settings(&self, json: &str) -> Result<(), Vec<String>> {
-        let next = settings::parse_settings(json)?;
+    async fn set_settings(&self, json: &str) -> Result<(), SetSettingsError> {
+        let next = settings::parse_settings(json).map_err(SetSettingsError::Rejected)?;
         *self.config.write().unwrap_or_else(|e| e.into_inner()) = next;
         self.republish().await;
         Ok(())
@@ -287,7 +287,8 @@ mod tests {
         let problems = player
             .set_settings(r#"{"general":{"tokens_interval_secs":1}}"#)
             .await
-            .unwrap_err();
+            .unwrap_err()
+            .problems();
         assert_eq!(problems.len(), 1);
     }
 

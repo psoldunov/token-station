@@ -69,10 +69,7 @@ impl TokenStation1 {
                 "settings JSON is larger than {MAX_SETTINGS_BYTES} bytes"
             )));
         }
-        self.backend
-            .set_settings(json)
-            .await
-            .map_err(|problems| fdo::Error::InvalidArgs(problems.join("; ")))
+        self.backend.set_settings(json).await.map_err(as_dbus_error)
     }
 
     /// Raw statusline JSON piped by `token-station statusline`.
@@ -91,6 +88,19 @@ impl TokenStation1 {
 
 /// Settings documents are small; anything larger is not a config.
 const MAX_SETTINGS_BYTES: usize = 256 * 1024;
+
+/// Which D-Bus error a failed `SetSettings` becomes.
+///
+/// `InvalidArgs` is a statement about what the caller sent, so it is reserved for
+/// documents the daemon refused; a write that failed is reported as `Failed`,
+/// which is what a client needs to tell "fix your input" from "try again".
+fn as_dbus_error(error: crate::backend::SetSettingsError) -> fdo::Error {
+    use crate::backend::SetSettingsError;
+    match error {
+        SetSettingsError::Rejected(problems) => fdo::Error::InvalidArgs(problems.join("; ")),
+        SetSettingsError::Failed(message) => fdo::Error::Failed(message),
+    }
+}
 
 /// Accept only a known provider and a plausible window id.
 fn validate_history_args(provider: &str, window_id: &str) -> Option<(ts_core::ProviderId, String)> {
@@ -121,6 +131,28 @@ pub async fn serve(
 mod tests {
     use super::*;
     use ts_core::ProviderId;
+
+    #[test]
+    fn bad_input_and_a_failed_write_are_different_errors() {
+        use crate::backend::SetSettingsError;
+
+        let rejected = as_dbus_error(SetSettingsError::Rejected(vec![
+            "general.limits_interval_secs must be 120..=86400".into(),
+            "alerts thresholds must be within 1..=100".into(),
+        ]));
+        assert!(matches!(rejected, fdo::Error::InvalidArgs(_)));
+        let message = rejected.to_string();
+        assert!(message.contains("limits_interval_secs"), "{message}");
+        assert!(message.contains("alerts thresholds"), "{message}");
+
+        // A full disk is not the caller's mistake, and a front end that reports
+        // it as one sends the user hunting through their own settings.
+        let failed = as_dbus_error(SetSettingsError::Failed(
+            "cannot write /home/u/.config/token-station/config.toml: No space left".into(),
+        ));
+        assert!(matches!(failed, fdo::Error::Failed(_)));
+        assert!(failed.to_string().contains("No space left"));
+    }
 
     #[test]
     fn history_arguments_are_validated() {

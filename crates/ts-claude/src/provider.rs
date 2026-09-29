@@ -2,7 +2,7 @@
 //! binary and local logs.
 
 use std::path::PathBuf;
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -37,6 +37,29 @@ struct Observations {
     last_endpoint_success_at: Option<i64>,
 }
 
+/// Where [`probe_io`] should look. Gathering it touches no disk, so it can be
+/// built on a runtime thread and the reads done on a blocking one.
+#[derive(Debug, Clone)]
+struct IoProbe {
+    binary_found: bool,
+    credentials: PathBuf,
+    projects: Vec<PathBuf>,
+}
+
+/// Read the facts [`IoCache`] holds. Blocking.
+fn probe_io(probe: &IoProbe, now: i64) -> IoCache {
+    let credentials_file_exists = probe.credentials.exists();
+    IoCache {
+        claude_binary_found: probe.binary_found,
+        credentials_file_exists,
+        credentials_expired: credentials_file_exists
+            && credentials::load(&probe.credentials)
+                .map(|c| c.expired(now))
+                .unwrap_or(false),
+        projects_dir_exists: probe.projects.iter().any(|p| p.exists()),
+    }
+}
+
 /// Filesystem/process facts `snapshot` needs but must never fetch itself.
 /// Refreshed from `refresh_limits`/`refresh_tokens`; read as a plain cache.
 #[derive(Debug, Clone, Default)]
@@ -61,7 +84,9 @@ pub struct ClaudeProvider {
     observations: RwLock<Observations>,
     io_cache: RwLock<IoCache>,
     ledger: Mutex<TokenLedger>,
-    scan_state: Mutex<LogScanState>,
+    /// Held across the whole blocking scan, so two scans cannot each start from a
+    /// state with no offsets and re-read every transcript of the last eight days.
+    scan_state: Arc<tokio::sync::Mutex<LogScanState>>,
     version_cache: Mutex<Option<String>>,
     binary_cache: Mutex<Option<Option<PathBuf>>>,
 }
@@ -86,14 +111,20 @@ impl ClaudeProvider {
             observations: RwLock::new(Observations::default()),
             io_cache: RwLock::new(IoCache::default()),
             ledger: Mutex::new(TokenLedger::new()),
-            scan_state: Mutex::new(LogScanState::default()),
+            scan_state: Arc::new(tokio::sync::Mutex::new(LogScanState::default())),
             version_cache: Mutex::new(None),
             binary_cache: Mutex::new(None),
         };
-        // Populate the IO cache once up front so a `snapshot()` taken before
-        // the first `refresh_limits`/`refresh_tokens` tick still reflects
-        // reality instead of the all-`false` default.
-        provider.refresh_io_cache(unix_now());
+        // Populate the IO cache once up front so a `snapshot()` taken before the
+        // first `refresh_limits`/`refresh_tokens` tick still reflects reality
+        // instead of the all-`false` default. This reads the disk, which is why
+        // the daemon only ever builds providers on a blocking thread.
+        let probe = IoProbe {
+            binary_found: provider.claude_binary().is_some(),
+            credentials: provider.credentials_path(),
+            projects: provider.projects_dir_candidates(),
+        };
+        provider.store_io_cache(probe_io(&probe, unix_now()));
         provider
     }
 
@@ -105,15 +136,18 @@ impl ClaudeProvider {
         self.config_dir().join(".credentials.json")
     }
 
-    fn projects_dirs(&self) -> Vec<PathBuf> {
-        let mut dirs = vec![self.config_dir().join("projects")];
-        let alt = self.env.home.join(".config/claude/projects");
-        if alt.exists() {
-            dirs.push(alt);
-        }
-        dirs
+    /// Both places transcripts can live, without asking the disk which exist.
+    ///
+    /// [`logs::scan`] skips a root that is not there, so there is nothing to gain
+    /// from stat-ing them on an async thread first.
+    fn projects_dir_candidates(&self) -> Vec<PathBuf> {
+        vec![
+            self.config_dir().join("projects"),
+            self.env.home.join(".config/claude/projects"),
+        ]
     }
 
+    /// The `claude` binary, discovered once. Blocking: it walks `PATH`.
     fn claude_binary(&self) -> Option<PathBuf> {
         let mut cache = self.binary_cache.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(cached) = cache.as_ref() {
@@ -121,6 +155,27 @@ impl ClaudeProvider {
         }
         let found = env::find_claude_binary(&self.config.binary, &self.env);
         *cache = Some(found.clone());
+        found
+    }
+
+    /// Same, off the runtime's threads: the first call walks `PATH`.
+    async fn claude_binary_off_thread(&self) -> Option<PathBuf> {
+        if let Some(cached) = self
+            .binary_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
+            return cached;
+        }
+        let (setting, env) = (self.config.binary.clone(), self.env.clone());
+        let found = tokio::task::spawn_blocking(move || env::find_claude_binary(&setting, &env))
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "the claude binary lookup did not run");
+                None
+            });
+        *self.binary_cache.lock().unwrap_or_else(|e| e.into_inner()) = Some(found.clone());
         found
     }
 
@@ -187,24 +242,28 @@ impl ClaudeProvider {
             .last_auth_status_check = Some(now);
     }
 
-    /// Recompute the filesystem/process facts `snapshot` needs, without ever
-    /// holding a lock while doing IO: everything below is plain reads/stats
-    /// into locals, and only the final assignment touches `io_cache`.
-    fn refresh_io_cache(&self, now: i64) {
-        let claude_binary_found = self.claude_binary().is_some();
-        let creds_path = self.credentials_path();
-        let credentials_file_exists = creds_path.exists();
-        let credentials_expired = credentials_file_exists
-            && credentials::load(&creds_path)
-                .map(|c| c.expired(now))
-                .unwrap_or(false);
-        let projects_dir_exists = self.projects_dirs().iter().any(|p| p.exists());
-        *self.io_cache.write().unwrap_or_else(|e| e.into_inner()) = IoCache {
-            claude_binary_found,
-            credentials_file_exists,
-            credentials_expired,
-            projects_dir_exists,
+    /// Recompute the filesystem facts `snapshot` needs, on a blocking thread.
+    ///
+    /// Reading the credentials file and stat-ing the transcript directories is
+    /// disk work on a home directory that may be on a network mount, and this is
+    /// called from the two async refresh paths: it does not belong on a runtime
+    /// thread. No lock is held while any of it happens — only the final
+    /// assignment touches `io_cache`.
+    async fn refresh_io_cache(&self, now: i64) {
+        let binary = self.claude_binary_off_thread().await;
+        let probe = IoProbe {
+            binary_found: binary.is_some(),
+            credentials: self.credentials_path(),
+            projects: self.projects_dir_candidates(),
         };
+        match tokio::task::spawn_blocking(move || probe_io(&probe, now)).await {
+            Ok(cache) => self.store_io_cache(cache),
+            Err(error) => tracing::warn!(%error, "the claude IO probe did not run"),
+        }
+    }
+
+    fn store_io_cache(&self, cache: IoCache) {
+        *self.io_cache.write().unwrap_or_else(|e| e.into_inner()) = cache;
     }
 
     fn set_last_outcome(&self, outcome: LastOutcome) {
@@ -281,7 +340,7 @@ impl Provider for ClaudeProvider {
 
     async fn refresh_limits(&self, force: bool) -> RefreshOutcome {
         let now = unix_now();
-        self.refresh_io_cache(now);
+        self.refresh_io_cache(now).await;
         // Check-and-record happens under one write lock so two concurrent
         // callers can never both observe `Proceed` for the same interval.
         let decision = {
@@ -371,21 +430,17 @@ impl Provider for ClaudeProvider {
     }
 
     async fn refresh_tokens(&self) {
-        let roots = self.projects_dirs();
+        let roots = self.projects_dir_candidates();
         let now = unix_now();
-        self.refresh_io_cache(now);
-        let mut state = {
-            let mut guard = self.scan_state.lock().unwrap_or_else(|e| e.into_inner());
-            std::mem::take(&mut *guard)
-        };
-        let (events, new_state) = tokio::task::spawn_blocking(move || {
-            let events = logs::scan(&roots, &mut state, now);
-            (events, state)
-        })
-        .await
-        .unwrap_or_else(|_| (Vec::new(), LogScanState::default()));
-
-        *self.scan_state.lock().unwrap_or_else(|e| e.into_inner()) = new_state;
+        self.refresh_io_cache(now).await;
+        // The guard is taken here and moved into the blocking task, so the state
+        // is held for the whole scan: taking it out and putting it back would let
+        // a second scan start with no offsets, re-read eight days of transcripts,
+        // and then overwrite whatever the first scan had recorded.
+        let mut guard = Arc::clone(&self.scan_state).lock_owned().await;
+        let events = tokio::task::spawn_blocking(move || logs::scan(&roots, &mut guard, now))
+            .await
+            .unwrap_or_default();
 
         if events.is_empty() {
             return;

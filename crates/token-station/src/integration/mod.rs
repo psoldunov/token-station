@@ -22,8 +22,8 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 
 use crate::integration::desktop::Desktop;
-use crate::integration::existing::Previous;
-use crate::integration::manifest::Manifest;
+use crate::integration::existing::{Previous, SystemDirs};
+use crate::integration::manifest::{ClaudeRecord, Manifest};
 use crate::integration::step::{Outcome, Step};
 use crate::paths::Env;
 
@@ -64,6 +64,8 @@ pub struct Session {
     /// `$DBUS_SESSION_BUS_ADDRESS`; kept explicit so a test never reaches the
     /// developer's own session bus and stops their tray.
     pub bus_address: Option<String>,
+    /// System roots searched for a packaged copy of what `setup` installs.
+    pub system: SystemDirs,
 }
 
 impl Session {
@@ -77,6 +79,7 @@ impl Session {
             path: var("PATH"),
             claude_config_dir: var("CLAUDE_CONFIG_DIR"),
             bus_address: var("DBUS_SESSION_BUS_ADDRESS"),
+            system: SystemDirs::current(),
         }
     }
 }
@@ -176,6 +179,7 @@ pub fn plan(options: &SetupOptions, env: &Env, session: &Session) -> anyhow::Res
     steps.extend(unless_packaged(
         dbus_activation::steps(&dirs, &exec),
         existing::packaged(&existing::service_candidates(
+            &session.system,
             &dirs.home,
             dbus_activation::SERVICE_FILE,
         )),
@@ -184,7 +188,11 @@ pub fn plan(options: &SetupOptions, env: &Env, session: &Session) -> anyhow::Res
     ));
     steps.extend(unless_packaged(
         systemd::steps(&dirs, &exec, systemctl.as_deref()),
-        existing::packaged(&existing::unit_candidates(&dirs.home, systemd::UNIT)),
+        existing::packaged(&existing::unit_candidates(
+            &session.system,
+            &dirs.home,
+            systemd::UNIT,
+        )),
         options.force,
         "systemd user unit",
     ));
@@ -240,6 +248,8 @@ pub fn setup(
 
     let owned = recorded_paths(previous.as_ref());
     let mut manifest = Manifest::new(&plan.exec, plan.desktop.as_str(), now);
+    // The manifest is written after every step, so an interrupted run still
+    // describes exactly what reached the disk.
     let outcome = match step::execute(
         &plan.steps,
         &mut manifest,
@@ -248,6 +258,7 @@ pub fn setup(
             claude: previous.as_ref().and_then(|old| old.claude.as_ref()),
             force: options.force,
         },
+        Some(&manifest_path),
     ) {
         Ok(outcome) => outcome,
         // Whatever did land is already recorded: store it, or `uninstall` would
@@ -261,7 +272,6 @@ pub fn setup(
             ));
         }
     };
-    manifest.systemd_unit = Some(systemd::unit_path(&Dirs::resolve(env)));
     if outcome.succeeded(gnome::EXTENSION_UUID) {
         manifest.gnome_extension = Some(gnome::EXTENSION_UUID.to_string());
     }
@@ -315,6 +325,11 @@ fn carry_forward(manifest: &mut Manifest, previous: Option<&Manifest>) {
     for file in &previous.files {
         manifest.add_file(file);
     }
+    // A unit an earlier run wrote and enabled is still enabled, even if this run
+    // left a packaged copy in charge and wrote none of its own.
+    if manifest.systemd_unit.is_none() {
+        manifest.systemd_unit = previous.systemd_unit.clone();
+    }
 }
 
 fn bullets(title: &str, lines: &[String]) -> String {
@@ -326,7 +341,12 @@ fn bullets(title: &str, lines: &[String]) -> String {
 }
 
 fn dry_run_summary(plan: &Plan, manifest_path: &Path) -> String {
-    let steps: Vec<String> = plan.steps.iter().map(Step::describe).collect();
+    let steps: Vec<String> = plan
+        .steps
+        .iter()
+        .flat_map(Step::flattened)
+        .map(Step::describe)
+        .collect();
     format!(
         "Token Station setup (dry run: nothing was changed)\n  \
          binary:   {}\n  desktop:  {}\n  manifest: {}{}",
@@ -381,13 +401,21 @@ pub fn uninstall(env: &Env, session: &Session) -> anyhow::Result<String> {
         &stop_steps(&manifest, session),
         &mut scratch,
         Previous::default(),
+        None,
     )?;
     outcome.warnings.extend(stopped.warnings);
     outcome.notes.extend(stopped.notes);
 
-    let statusline = restore_statusline(&manifest, &mut outcome);
+    let claude = trusted_claude(&manifest, env, session, &mut outcome);
+    let statusline = restore_statusline(claude, &mut outcome);
     let keep_backup = statusline.is_empty();
-    let removed = remove_recorded(&manifest, &Dirs::resolve(env), keep_backup, &mut outcome);
+    let removed = remove_recorded(
+        &manifest,
+        claude,
+        &Dirs::resolve(env),
+        keep_backup,
+        &mut outcome,
+    );
     if let Err(error) = std::fs::remove_file(&manifest_path) {
         outcome
             .warnings
@@ -423,8 +451,31 @@ fn stop_steps(manifest: &Manifest, session: &Session) -> Vec<Step> {
     steps
 }
 
-fn restore_statusline(manifest: &Manifest, outcome: &mut Outcome) -> Vec<String> {
-    let Some(record) = &manifest.claude else {
+/// The statusline record, if it describes the file `--claude-statusline` patches.
+///
+/// A manifest that names anything else is a manifest somebody edited: see
+/// [`removal::trusted_claude_record`].
+fn trusted_claude<'a>(
+    manifest: &'a Manifest,
+    env: &Env,
+    session: &Session,
+    outcome: &mut Outcome,
+) -> Option<&'a ClaudeRecord> {
+    let record = manifest.claude.as_ref()?;
+    let settings = claude_settings::settings_path(env, session.claude_config_dir.as_deref());
+    if removal::trusted_claude_record(record, &settings) {
+        return Some(record);
+    }
+    outcome.warnings.push(format!(
+        "the manifest's statusLine record names {} rather than {}; left both alone",
+        record.settings.display(),
+        settings.display()
+    ));
+    None
+}
+
+fn restore_statusline(claude: Option<&ClaudeRecord>, outcome: &mut Outcome) -> Vec<String> {
+    let Some(record) = claude else {
         return Vec::new();
     };
     match claude_settings::restore(record) {
@@ -449,11 +500,12 @@ fn restore_statusline(manifest: &Manifest, outcome: &mut Outcome) -> Vec<String>
 /// put back: it is the only way to recover the original by hand.
 fn remove_recorded(
     manifest: &Manifest,
+    claude: Option<&ClaudeRecord>,
     dirs: &Dirs,
     keep_backup: bool,
     outcome: &mut Outcome,
 ) -> Vec<String> {
-    let backup = manifest.claude.as_ref().map(|record| record.backup.clone());
+    let backup = claude.map(|record| record.backup.clone());
     let mut removed = Vec::new();
     for dir in &manifest.dirs {
         if !removal::removable_dir(dir, dirs) {

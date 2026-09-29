@@ -7,6 +7,8 @@ use std::path::PathBuf;
 
 use ts_core::discovery::SearchEnv;
 
+use crate::http_fallback::HttpTimeouts;
+
 #[derive(Debug, Clone)]
 pub struct CodexEnv {
     /// `$HOME`, used to expand `~` in configured homes and to default to `~/.codex`.
@@ -17,6 +19,8 @@ pub struct CodexEnv {
     pub binary_override: Option<PathBuf>,
     /// Base URL for the HTTP fallback (`https://chatgpt.com` in production).
     pub http_base_url: String,
+    /// Bounds on the HTTP fallback's request; see [`HttpTimeouts`].
+    pub http_timeouts: HttpTimeouts,
     /// Search environment ([`SearchEnv`]) used to discover the real `codex` binary.
     pub search: SearchEnv,
 }
@@ -29,6 +33,7 @@ impl CodexEnv {
             codex_home: std::env::var("CODEX_HOME").ok(),
             binary_override: None,
             http_base_url: "https://chatgpt.com".to_string(),
+            http_timeouts: HttpTimeouts::default(),
             search: SearchEnv::current(),
         }
     }

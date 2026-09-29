@@ -3,8 +3,8 @@
 //! One SQLite file in the state directory. Every call blocks, so the daemon drives
 //! this store through [`HistoryHandle`], which moves the work onto a blocking thread.
 
-use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use rusqlite::Connection;
 use ts_core::ProviderId;
@@ -189,19 +189,42 @@ fn round2(value: f64) -> f64 {
 }
 
 /// Async front door: every call hops to a blocking thread.
+///
+/// A handle built by [`HistoryHandle::deferred`] opens its store the first time it
+/// is used rather than when it is built. The daemon has to be assembled before it
+/// owns its bus name — the D-Bus object must be exported first, or the very call
+/// that activated the daemon is answered with an error — and a daemon that then
+/// loses the name race should not have created, locked or journalled the database
+/// of the one that won.
 #[derive(Clone)]
 pub struct HistoryHandle {
-    store: Arc<HistoryStore>,
+    store: Arc<OnceLock<Option<Arc<HistoryStore>>>>,
+    /// Where to open the store on first use; `None` once one is already in hand.
+    path: Option<PathBuf>,
 }
 
 impl HistoryHandle {
+    /// A handle around a store that is already open.
     pub fn new(store: Arc<HistoryStore>) -> HistoryHandle {
-        HistoryHandle { store }
+        let cell = OnceLock::new();
+        let _ = cell.set(Some(store));
+        HistoryHandle {
+            store: Arc::new(cell),
+            path: None,
+        }
     }
 
-    /// Open `path`, falling back to an in-memory store when the file is unusable.
+    /// A handle that opens (and creates) `path` the first time it is used.
+    pub fn deferred(path: &Path) -> HistoryHandle {
+        HistoryHandle {
+            store: Arc::new(OnceLock::new()),
+            path: Some(path.to_path_buf()),
+        }
+    }
+
+    /// Open `path` now, falling back to an in-memory store when the file is unusable.
     ///
-    /// Only a broken SQLite build makes this fail, and then the daemon cannot run.
+    /// Only a broken SQLite build makes this fail.
     pub fn open_or_memory(path: &Path) -> Result<HistoryHandle, HistoryError> {
         let store = HistoryStore::open(path).or_else(|error| {
             tracing::error!(%error, "history database unavailable, keeping history in memory");
@@ -210,9 +233,33 @@ impl HistoryHandle {
         Ok(HistoryHandle::new(Arc::new(store)))
     }
 
+    /// The store, opened on first use. Blocking; only called on blocking threads.
+    fn store(&self) -> Option<Arc<HistoryStore>> {
+        self.store.get_or_init(|| self.open()).clone()
+    }
+
+    fn open(&self) -> Option<Arc<HistoryStore>> {
+        let path = self.path.as_ref()?;
+        let opened = HistoryStore::open(path).or_else(|error| {
+            tracing::error!(%error, "history database unavailable, keeping history in memory");
+            HistoryStore::in_memory()
+        });
+        match opened {
+            Ok(store) => Some(Arc::new(store)),
+            // Nothing is left to try; the daemon still works, without a sparkline.
+            Err(error) => {
+                tracing::error!(%error, "no history store: usage history will not be recorded");
+                None
+            }
+        }
+    }
+
     pub async fn record(&self, samples: Vec<OwnedSample>) {
-        let store = Arc::clone(&self.store);
+        let handle = self.clone();
         let result = tokio::task::spawn_blocking(move || {
+            let Some(store) = handle.store() else {
+                return Ok(());
+            };
             let borrowed: Vec<Sample<'_>> = samples.iter().map(OwnedSample::as_sample).collect();
             store.record(&borrowed)
         })
@@ -226,21 +273,28 @@ impl HistoryHandle {
         window_id: String,
         since: i64,
     ) -> Vec<(i64, f64)> {
-        let store = Arc::clone(&self.store);
-        tokio::task::spawn_blocking(move || store.query(provider, &window_id, since))
-            .await
-            .map_err(|e| e.to_string())
-            .and_then(|r| r.map_err(|e| e.to_string()))
-            .unwrap_or_else(|error| {
-                tracing::error!(%error, "history query failed");
-                Vec::new()
-            })
+        let handle = self.clone();
+        tokio::task::spawn_blocking(move || match handle.store() {
+            Some(store) => store.query(provider, &window_id, since),
+            None => Ok(Vec::new()),
+        })
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r.map_err(|e| e.to_string()))
+        .unwrap_or_else(|error| {
+            tracing::error!(%error, "history query failed");
+            Vec::new()
+        })
     }
 
     pub async fn prune(&self, cutoff: i64) {
-        let store = Arc::clone(&self.store);
-        let result = tokio::task::spawn_blocking(move || store.prune(cutoff)).await;
-        log_failure("prune", result.map(|r| r.map(|_| ())));
+        let handle = self.clone();
+        let result = tokio::task::spawn_blocking(move || match handle.store() {
+            Some(store) => store.prune(cutoff).map(|_| ()),
+            None => Ok(()),
+        })
+        .await;
+        log_failure("prune", result);
     }
 }
 

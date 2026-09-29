@@ -8,6 +8,7 @@ use anyhow::Context;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use ts_core::config::Config;
+use ts_core::pricing::Pricing;
 use zbus::export::futures_core::Stream;
 use zbus::fdo::{DBusProxy, RequestNameFlags, RequestNameReply};
 
@@ -20,7 +21,6 @@ use crate::fixture::FixturePlayer;
 use crate::history::HistoryHandle;
 use crate::notify::DesktopNotifier;
 use crate::paths::Paths;
-use crate::pricing_refresh;
 use crate::publish::Publisher;
 
 /// Message shown when the well-known name is taken.
@@ -151,35 +151,39 @@ async fn serve_live(
     Ok(handles)
 }
 
-/// Seed the price table and open the history database, off the async threads.
+/// Assemble the daemon, off the async threads and without opening anything.
+///
+/// The history database and the pricing cache are deliberately left untouched
+/// here: this runs before the bus name is claimed (the object has to answer the
+/// call that activated us), and a daemon that loses that race must not have
+/// created, locked or read the files belonging to the one that won. The history
+/// store opens on its first use and [`Daemon::merge_pricing_cache`] reads the
+/// cache, both of them from [`startup_work`], which only runs once the name is
+/// ours.
 async fn build_daemon(
     connection: zbus::Connection,
     paths: Paths,
     config: Config,
 ) -> anyhow::Result<Arc<Daemon>> {
-    let cache = paths.pricing_cache();
-    let database = paths.history_db();
-    let (pricing, history) = tokio::task::spawn_blocking(move || {
-        (
-            pricing_refresh::bundled_with_cache(&cache),
-            HistoryHandle::open_or_memory(&database),
+    let history = HistoryHandle::deferred(&paths.history_db());
+    let notifier = Arc::new(DesktopNotifier::new(connection));
+    tokio::task::spawn_blocking(move || {
+        Daemon::new(
+            paths,
+            config,
+            Arc::new(std::sync::RwLock::new(Pricing::bundled())),
+            history,
+            notifier,
+            system_clock(),
         )
     })
     .await
-    .context("the daemon's startup work did not run")?;
-
-    Ok(Daemon::new(
-        paths,
-        config,
-        Arc::new(std::sync::RwLock::new(pricing)),
-        history.context("cannot open the history database")?,
-        Arc::new(DesktopNotifier::new(connection)),
-        system_clock(),
-    ))
+    .context("the daemon's startup work did not run")
 }
 
-/// The first refresh plus the first pricing update.
+/// The cached price table, the first refresh and the first pricing update.
 async fn startup_work(daemon: Arc<Daemon>) {
+    daemon.merge_pricing_cache().await;
     daemon.refresh_all(false).await;
     daemon.prune_history().await;
     daemon.refresh_pricing().await;

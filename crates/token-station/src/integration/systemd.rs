@@ -23,13 +23,9 @@ pub fn unit_path(dirs: &Dirs) -> PathBuf {
     dirs.config.join("systemd/user").join(UNIT)
 }
 
-/// Quote one word of a systemd command line.
-///
-/// Inside the double quotes a backslash and a double quote each need an extra
-/// backslash, and a literal per-cent sign is written `%%` so systemd does not read
-/// it as a specifier.
+/// Quote one word of a systemd command line; see [`quoting::SYSTEMD`].
 pub fn quote_word(value: &str) -> String {
-    quoting::quoted(value, &quoting::SYSTEMD_ESCAPED)
+    quoting::quoted(value, &quoting::SYSTEMD)
 }
 
 /// The unit text for `exec`.
@@ -38,21 +34,26 @@ pub fn unit_text(exec: &Path) -> String {
 }
 
 /// Write the unit, then reload and enable it when `systemctl` is available.
+///
+/// The reload and the enable hang off the write ([`Step::Unit`]) rather than
+/// following it: when the unit already belongs to a package or to home-manager
+/// the write is skipped, and `enable --now` would then start — and `uninstall`
+/// would later `disable --now` — a unit that was never ours.
 pub fn steps(dirs: &Dirs, exec: &Path, systemctl: Option<&Path>) -> Vec<Step> {
-    let mut steps = vec![Step::Write {
+    let then = match systemctl {
+        Some(tool) => vec![
+            run(tool, &["daemon-reload"]),
+            run(tool, &["enable", "--now", UNIT]),
+        ],
+        None => vec![Step::Note(format!(
+            "`{SYSTEMCTL}` was not found: the daemon will start through D-Bus activation instead."
+        ))],
+    };
+    vec![Step::Unit {
         target: unit_path(dirs),
         contents: unit_text(exec),
-    }];
-    match systemctl {
-        Some(tool) => {
-            steps.push(run(tool, &["daemon-reload"]));
-            steps.push(run(tool, &["enable", "--now", UNIT]));
-        }
-        None => steps.push(Step::Note(format!(
-            "`{SYSTEMCTL}` was not found: the daemon will start through D-Bus activation instead."
-        ))),
-    }
-    steps
+        then,
+    }]
 }
 
 fn run(tool: &Path, args: &[&str]) -> Step {
@@ -112,38 +113,46 @@ mod tests {
         );
     }
 
+    /// The unit step's target and its follow-up steps.
+    fn unit_step(systemctl: Option<&Path>) -> (PathBuf, Vec<Step>) {
+        let steps = steps(&dirs(), Path::new("/x"), systemctl);
+        assert_eq!(steps.len(), 1, "one step owns the unit: {steps:?}");
+        match steps.into_iter().next() {
+            Some(Step::Unit { target, then, .. }) => (target, then),
+            other => panic!("expected a unit step, got {other:?}"),
+        }
+    }
+
     #[test]
-    fn with_systemctl_the_unit_is_reloaded_and_enabled() {
+    fn with_systemctl_the_unit_is_reloaded_and_enabled_after_its_own_write() {
         let tool = PathBuf::from("/bin/systemctl");
-        let steps = steps(&dirs(), Path::new("/x"), Some(&tool));
-        assert!(matches!(&steps[0], Step::Write { target, .. } if *target == unit_path(&dirs())));
+        let (target, then) = unit_step(Some(&tool));
+        assert_eq!(target, unit_path(&dirs()));
         assert_eq!(
-            steps[1],
-            Step::Run {
-                program: tool.clone(),
-                args: vec!["--user".into(), "daemon-reload".into()],
-            }
-        );
-        assert_eq!(
-            steps[2],
-            Step::Run {
-                program: tool,
-                args: vec![
-                    "--user".into(),
-                    "enable".into(),
-                    "--now".into(),
-                    UNIT.into()
-                ],
-            }
+            then,
+            vec![
+                Step::Run {
+                    program: tool.clone(),
+                    args: vec!["--user".into(), "daemon-reload".into()],
+                },
+                Step::Run {
+                    program: tool,
+                    args: vec![
+                        "--user".into(),
+                        "enable".into(),
+                        "--now".into(),
+                        UNIT.into()
+                    ],
+                },
+            ]
         );
     }
 
     #[test]
     fn without_systemctl_the_unit_is_still_written() {
-        let steps = steps(&dirs(), Path::new("/x"), None);
-        assert_eq!(steps.len(), 2);
-        assert!(matches!(&steps[0], Step::Write { .. }));
-        assert!(matches!(&steps[1], Step::Note(text) if text.contains("D-Bus activation")));
+        let (target, then) = unit_step(None);
+        assert_eq!(target, unit_path(&dirs()));
+        assert!(matches!(&then[..], [Step::Note(text)] if text.contains("D-Bus activation")));
         assert!(disable_steps(None).is_empty());
     }
 

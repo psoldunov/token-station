@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use token_station::backend::Backend;
+use token_station::backend::{Backend, SetSettingsError};
 use token_station::clock::fixed_clock;
 use token_station::daemon::Daemon;
 use token_station::history::{HistoryHandle, HistoryStore};
@@ -152,6 +152,31 @@ fn harness(percent: f64) -> Harness {
     }
 }
 
+/// Wait for spawned work that hops onto a blocking thread, or give up.
+///
+/// [`settle`] only yields, which a task waiting on a blocking thread can lose:
+/// two hundred yields cost less time than one round trip to the pool.
+async fn settle_blocking(ready: impl Fn() -> bool) -> bool {
+    for _ in 0..200 {
+        if ready() {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    ready()
+}
+
+/// Let spawned tasks run until `ready`, or give up.
+async fn settle(ready: impl Fn() -> bool) -> bool {
+    for _ in 0..200 {
+        if ready() {
+            return true;
+        }
+        tokio::task::yield_now().await;
+    }
+    ready()
+}
+
 #[tokio::test]
 async fn a_limits_refresh_records_history_publishes_and_notifies() {
     let h = harness(0.0);
@@ -224,7 +249,7 @@ async fn invalid_settings_are_rejected_without_touching_the_file() {
         .set_settings(r#"{"general":{"limits_interval_secs":5}}"#)
         .await
         .unwrap_err();
-    assert_eq!(problems.len(), 1);
+    assert_eq!(problems.problems().len(), 1);
     assert!(!h.paths.config_file.exists());
     assert_eq!(h.daemon.config(), Config::default());
 }
@@ -357,17 +382,6 @@ async fn the_scheduler_drives_both_refresh_loops() {
     use std::time::Duration;
     use token_station::daemon::scheduler;
 
-    /// Let the spawned loops run until `ready`, or give up.
-    async fn settle(ready: impl Fn() -> bool) -> bool {
-        for _ in 0..200 {
-            if ready() {
-                return true;
-            }
-            tokio::task::yield_now().await;
-        }
-        ready()
-    }
-
     let h = harness(5.0);
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let handles = scheduler::spawn_all(&h.daemon, &shutdown_rx);
@@ -416,6 +430,54 @@ async fn a_disabled_provider_is_rebuilt_and_reported_as_off() {
 }
 
 #[tokio::test]
+async fn set_settings_replies_before_the_rebuilt_provider_is_read() {
+    let h = harness(10.0);
+    let before = h.claude.token_refreshes.load(Ordering::SeqCst);
+
+    h.daemon
+        .set_settings(r#"{"codex":{"enabled":false}}"#)
+        .await
+        .expect("accepted");
+
+    // Reading a rebuilt provider talks to the network, and the caller is waiting
+    // on a D-Bus reply with a timeout of its own: the fill-in must happen after
+    // the reply, so nothing has read a provider yet.
+    assert_eq!(h.claude.token_refreshes.load(Ordering::SeqCst), before);
+    // But the published snapshot already reflects the change.
+    assert!(
+        h.daemon
+            .publisher
+            .snapshot()
+            .providers
+            .iter()
+            .any(|p| p.id == ProviderId::Codex && p.state == ProviderState::Disabled)
+    );
+    // And the fill-in does happen, once the caller lets go of the thread.
+    assert!(settle_blocking(|| h.claude.token_refreshes.load(Ordering::SeqCst) > before).await);
+}
+
+#[tokio::test]
+async fn a_failed_settings_write_is_not_reported_as_bad_input() {
+    let h = harness(10.0);
+    // A directory where `config.toml` belongs: the settings are perfectly valid
+    // and the write cannot succeed, which is the daemon's failure, not the
+    // caller's. Reporting it as `InvalidArgs` sends the user looking for a
+    // mistake in their own input.
+    std::fs::create_dir_all(&h.paths.config_file).unwrap();
+
+    let error = h
+        .daemon
+        .set_settings(r#"{"alerts":{"warning_percent":60.0,"critical_percent":90.0}}"#)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, SetSettingsError::Failed(_)), "{error:?}");
+    assert!(error.to_string().contains("cannot write"), "{error}");
+    // Nothing was applied, either.
+    assert_eq!(h.daemon.config(), Config::default());
+}
+
+#[tokio::test]
 async fn set_settings_refuses_a_config_file_it_must_not_rewrite() {
     let h = harness(10.0);
     // What home-manager leaves at `config.toml`: a symlink into the store.
@@ -430,7 +492,12 @@ async fn set_settings_refuses_a_config_file_it_must_not_rewrite() {
         .await
         .unwrap_err();
 
-    assert_eq!(problems, vec![settings::MANAGED_DECLARATIVELY.to_string()]);
+    // A file somebody else manages is something the caller has to fix, so it is
+    // still reported as bad input rather than as a daemon failure.
+    assert_eq!(
+        problems,
+        SetSettingsError::Rejected(vec![settings::MANAGED_DECLARATIVELY.to_string()])
+    );
     // Neither the link nor the file it points at moved, and nothing was applied.
     assert!(
         std::fs::symlink_metadata(&h.paths.config_file)

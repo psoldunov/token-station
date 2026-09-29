@@ -9,6 +9,7 @@
 //! alert fires from a tokio worker thread, so the daemon owns the proxy instead.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use ts_core::Level;
@@ -21,6 +22,9 @@ pub const APP_NAME: &str = "Token Station";
 
 /// How long a notification stays up; `-1` leaves it to the server's default.
 const EXPIRE_DEFAULT: i32 = -1;
+
+/// Longest one notification may take before it is given up on.
+pub const NOTIFY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Where the notification server listens.
 pub const NOTIFICATIONS_SERVICE: &str = "org.freedesktop.Notifications";
@@ -154,12 +158,21 @@ fn format_duration(seconds: i64, gap: &str, d: &str, h: &str, m: &str) -> String
     }
 }
 
-/// Show every alert.
+/// Show every alert, giving each one [`NOTIFY_TIMEOUT`] at most.
+///
+/// The bound is here rather than in [`DesktopNotifier`] so it holds for whatever
+/// is behind the trait. A notification server that accepts the call and never
+/// answers is not hypothetical, and this runs on the refresh path: without a
+/// timeout one wedged server stops the coalescer, the scheduler and every
+/// subsequent refresh, and the tray simply stops updating.
 pub async fn deliver(notifier: &dyn Notifier, alerts: &[Alert], now: i64) {
     for alert in alerts {
         let (summary, body, level) = alert_text(alert, now);
         tracing::info!(%summary, %body, "alert");
-        notifier.notify(&summary, &body, level).await;
+        let shown = notifier.notify(&summary, &body, level);
+        if tokio::time::timeout(NOTIFY_TIMEOUT, shown).await.is_err() {
+            tracing::warn!(%summary, "the notification server did not answer in time");
+        }
     }
 }
 
@@ -283,5 +296,32 @@ mod tests {
     #[tokio::test]
     async fn silent_notifier_does_nothing() {
         SilentNotifier.notify("a", "b", Level::Critical).await;
+    }
+
+    /// A notification server that accepts the call and never answers.
+    struct HangingNotifier;
+
+    #[async_trait]
+    impl Notifier for HangingNotifier {
+        async fn notify(&self, _summary: &str, _body: &str, _level: Level) {
+            std::future::pending::<()>().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_server_that_never_answers_is_given_up_on() {
+        let started = tokio::time::Instant::now();
+        deliver(
+            &HangingNotifier,
+            &[
+                alert(AlertKind::Warning, 81.0, Some(3_600)),
+                alert(AlertKind::Critical, 99.0, Some(3_600)),
+            ],
+            0,
+        )
+        .await;
+        // Each alert waits its own timeout and no longer, so the refresh path
+        // carries on instead of stopping for good.
+        assert_eq!(started.elapsed(), NOTIFY_TIMEOUT * 2);
     }
 }

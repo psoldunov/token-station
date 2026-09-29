@@ -12,8 +12,26 @@ use crate::windows::{plan_label, window_kind, window_label};
 
 /// Bounds on the fallback HTTP call so a stalled/unreachable endpoint can
 /// never hang a caller holding a lock (e.g. `refresh_limits`'s session lock).
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+///
+/// Carried as data rather than hard-coded so a test can prove the give-up path in
+/// milliseconds: asserting it with the production values means a test that really
+/// waits twenty seconds, which is how a bound this important ends up untested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HttpTimeouts {
+    /// Whole request, headers and body.
+    pub request: Duration,
+    /// Establishing the connection.
+    pub connect: Duration,
+}
+
+impl Default for HttpTimeouts {
+    fn default() -> HttpTimeouts {
+        HttpTimeouts {
+            request: Duration::from_secs(20),
+            connect: Duration::from_secs(10),
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum HttpFallbackError {
@@ -42,10 +60,10 @@ pub struct HttpFallback {
 }
 
 impl HttpFallback {
-    pub fn new(base_url: String, user_agent: String) -> HttpFallback {
+    pub fn new(base_url: String, user_agent: String, timeouts: HttpTimeouts) -> HttpFallback {
         let client = reqwest::Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(timeouts.request)
+            .connect_timeout(timeouts.connect)
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         HttpFallback {
@@ -235,7 +253,11 @@ mod tests {
             .mount(&server)
             .await;
 
-        let fallback = HttpFallback::new(server.uri(), "token-station/test".into());
+        let fallback = HttpFallback::new(
+            server.uri(),
+            "token-station/test".into(),
+            HttpTimeouts::default(),
+        );
         let mapping = fallback.fetch_usage(&tokens(), 0).await.unwrap();
         assert_eq!(mapping.plan, Some("Plus".to_string()));
         assert_eq!(mapping.windows.len(), 1);
@@ -250,7 +272,11 @@ mod tests {
             .mount(&server)
             .await;
 
-        let fallback = HttpFallback::new(server.uri(), "token-station/test".into());
+        let fallback = HttpFallback::new(
+            server.uri(),
+            "token-station/test".into(),
+            HttpTimeouts::default(),
+        );
         let err = fallback.fetch_usage(&tokens(), 0).await.unwrap_err();
         assert!(matches!(err, HttpFallbackError::Unauthorized));
     }
@@ -264,14 +290,30 @@ mod tests {
             .mount(&server)
             .await;
 
-        let fallback = HttpFallback::new(server.uri(), "token-station/test".into());
-        // The client's own 20s request timeout must fire well before this
-        // outer guard, proving `fetch_usage` gives up instead of hanging
-        // until the mock's 60s delay elapses.
-        let err = tokio::time::timeout(Duration::from_secs(25), fallback.fetch_usage(&tokens(), 0))
+        // A short request timeout, so this asserts the give-up path in a fraction
+        // of a second rather than waiting out the production twenty.
+        let fallback = HttpFallback::new(
+            server.uri(),
+            "token-station/test".into(),
+            HttpTimeouts {
+                request: Duration::from_millis(200),
+                ..HttpTimeouts::default()
+            },
+        );
+        let started = std::time::Instant::now();
+        let err = tokio::time::timeout(Duration::from_secs(5), fallback.fetch_usage(&tokens(), 0))
             .await
             .expect("fetch_usage must give up on its own before the outer timeout")
             .unwrap_err();
         assert!(matches!(err, HttpFallbackError::Request(_)));
+        assert!(started.elapsed() < Duration::from_secs(2), "{err}");
+    }
+
+    #[test]
+    fn the_production_timeouts_stay_bounded() {
+        let timeouts = HttpTimeouts::default();
+        assert_eq!(timeouts.request, Duration::from_secs(20));
+        assert_eq!(timeouts.connect, Duration::from_secs(10));
+        assert!(timeouts.connect < timeouts.request);
     }
 }

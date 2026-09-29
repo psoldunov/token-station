@@ -5,9 +5,15 @@
 //! rather than trusted: only the fixed names `setup` installs, only under the XDG
 //! roots it writes into, and only when no symlink along the way leaves those roots.
 
+use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 
+use crate::integration::claude_settings;
+use crate::integration::manifest::ClaudeRecord;
 use crate::integration::{Dirs, dbus_activation, desktop, gnome, plasma, systemd};
+
+/// The only file name `--claude-statusline` ever patches.
+pub const CLAUDE_SETTINGS: &str = "settings.json";
 
 /// Directory names `setup` creates and owns outright.
 pub fn dir_names() -> Vec<&'static str> {
@@ -39,9 +45,25 @@ pub fn removable_dir(path: &Path, dirs: &Dirs) -> bool {
 /// Is `path` a file `setup` writes, or the one backup it took?
 ///
 /// The backup sits next to Claude Code's `settings.json`, which the user may put
-/// anywhere, so it is allowed by exact match against the record being undone.
+/// anywhere, so it is allowed by exact match against the record being undone —
+/// and only after [`trusted_claude_record`] has agreed that record is one of ours.
 pub fn removable_file(path: &Path, dirs: &Dirs, backup: Option<&Path>) -> bool {
     backup.is_some_and(|known| known == path) || named_under(path, &roots(dirs), &file_names())
+}
+
+/// Is `record` a statusline record `uninstall` may act on?
+///
+/// The manifest is a plain JSON file in the state directory, so a `claude` record
+/// naming `~/.ssh/id_ed25519` as its "backup" is a file anything that can write
+/// there could ask `uninstall` to delete, and any JSON file at all could be asked
+/// to have its `statusLine` rewritten. Neither is trusted: the settings file has
+/// to be the `settings.json` in the Claude config directory this session resolves
+/// to, and the backup has to be exactly the path
+/// [`claude_settings::backup_path`] derives from it.
+pub fn trusted_claude_record(record: &ClaudeRecord, settings: &Path) -> bool {
+    record.settings == settings
+        && record.settings.file_name() == Some(OsStr::new(CLAUDE_SETTINGS))
+        && record.backup == claude_settings::backup_path(settings)
 }
 
 /// `path` carries one of `names`, sits under one of `roots`, and gets there
@@ -191,6 +213,34 @@ mod tests {
             !removable_file(&target, &home.dirs, None),
             "a symlinked parent that leaves the root is refused"
         );
+    }
+
+    /// A record for `settings`, with the backup name `setup` really writes.
+    fn record(settings: &Path) -> ClaudeRecord {
+        ClaudeRecord {
+            settings: settings.to_path_buf(),
+            backup: claude_settings::backup_path(settings),
+            previous: None,
+            command: "'/opt/TokenStation.AppImage' statusline".into(),
+        }
+    }
+
+    #[test]
+    fn only_the_settings_file_this_session_resolves_to_is_trusted() {
+        let home = home();
+        let settings = home.dirs.home.join(".claude/settings.json");
+        assert!(trusted_claude_record(&record(&settings), &settings));
+
+        // A manifest naming somebody else's file, or another directory's.
+        let elsewhere = home.dirs.home.join(".claude/config.json");
+        assert!(!trusted_claude_record(&record(&elsewhere), &elsewhere));
+        let other_dir = home.dirs.home.join(".config/claude/settings.json");
+        assert!(!trusted_claude_record(&record(&other_dir), &settings));
+
+        // And a backup that is not the settings file plus the suffix.
+        let mut tampered = record(&settings);
+        tampered.backup = home.dirs.home.join(".ssh/id_ed25519");
+        assert!(!trusted_claude_record(&tampered, &settings));
     }
 
     #[test]

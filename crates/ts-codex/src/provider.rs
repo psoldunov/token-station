@@ -49,15 +49,15 @@ struct Session {
 /// Everything [`refresh_limits`](CodexProvider::refresh_limits) mutates. Kept
 /// behind one async mutex; [`CodexProvider::snapshot`] never touches it.
 ///
-/// The rollout `scanner` deliberately lives outside this struct, behind its
-/// own lock: it is `refresh_tokens`'s only dependency, and a slow
-/// `refresh_limits` attempt (app-server call, HTTP fallback) must never block
-/// token scanning by holding this lock the whole time.
+/// The rollout `scanner` and the last rollout-derived rate limits deliberately
+/// live outside this struct, behind locks of their own: they are
+/// `refresh_tokens`'s only dependencies, and a slow `refresh_limits` attempt
+/// (app-server call, HTTP fallback) must never block token scanning by holding
+/// this lock the whole time.
 struct Inner {
     session: Option<Session>,
     process_backoff: Backoff,
     limits_backoff: Backoff,
-    last_rollout_rate_limits: Option<(i64, RateLimitSnapshotDto)>,
 }
 
 /// Published fields [`CodexProvider::snapshot`] reads without ever blocking.
@@ -97,7 +97,13 @@ pub struct CodexProvider {
     pricing: SharedPricing,
     env: CodexEnv,
     inner: Arc<TokioMutex<Inner>>,
-    scanner: TokioMutex<RolloutScanner>,
+    /// Held across the whole blocking scan, so two scans cannot each start from
+    /// a scanner with no state and re-read eight days of rollout files.
+    scanner: Arc<TokioMutex<RolloutScanner>>,
+    /// The newest rate-limit snapshot any rollout file has carried, with its
+    /// timestamp. Its own lock: `refresh_tokens` must not queue behind a
+    /// `refresh_limits` attempt just to store it.
+    rollout_limits: StdRwLock<Option<(i64, RateLimitSnapshotDto)>>,
     cached: StdRwLock<Cached>,
     ledger: StdRwLock<TokenLedger>,
     scheduling: StdRwLock<Scheduling>,
@@ -119,9 +125,9 @@ impl CodexProvider {
                 session: None,
                 process_backoff: Backoff::new(Duration::from_secs(5), Duration::from_secs(300)),
                 limits_backoff: Backoff::new(Duration::from_secs(60), Duration::from_secs(1800)),
-                last_rollout_rate_limits: None,
             })),
-            scanner: TokioMutex::new(RolloutScanner::new()),
+            scanner: Arc::new(TokioMutex::new(RolloutScanner::new())),
+            rollout_limits: StdRwLock::new(None),
             cached: StdRwLock::new(Cached::default()),
             ledger: StdRwLock::new(TokenLedger::new()),
             scheduling: StdRwLock::new(Scheduling::default()),
@@ -373,34 +379,26 @@ impl Provider for CodexProvider {
     async fn refresh_tokens(&self) {
         let homes = self.resolve_homes();
         let now = Self::now_unix();
-        // Own lock, separate from `inner`: a slow `refresh_limits` attempt
-        // holding `inner` must never block this scan.
-        let scanner = {
-            let mut guard = self.scanner.lock().await;
-            std::mem::take(&mut *guard)
-        };
-        let (scanner, output) = tokio::task::spawn_blocking(move || {
-            let mut scanner = scanner;
-            let output = scanner.scan(&homes, now);
-            (scanner, output)
-        })
-        .await
-        .unwrap_or_else(|_| {
-            (
-                RolloutScanner::new(),
-                crate::rollouts::ScanOutput::default(),
-            )
-        });
-        *self.scanner.lock().await = scanner;
+        // The guard is taken here and moved into the blocking task, so it is held
+        // for the whole scan: taking the scanner out and putting it back would let
+        // a second scan start from an empty one, re-read every rollout file of the
+        // last eight days, and then overwrite the first scan's state.
+        let mut guard = Arc::clone(&self.scanner).lock_owned().await;
+        let output = tokio::task::spawn_blocking(move || guard.scan(&homes, now))
+            .await
+            .unwrap_or_default();
 
-        if let Some(latest) = output.latest_rate_limits {
-            let mut inner = self.inner.lock().await;
-            inner.last_rollout_rate_limits = Some(latest);
-        }
+        // The ledger first: it is what this call exists for, and it needs no lock
+        // anybody else holds for long.
         let mut ledger = self.ledger.write().unwrap_or_else(|e| e.into_inner());
         *ledger = std::mem::take(&mut *ledger)
             .with_events(output.events)
             .pruned(now - TOKEN_RETENTION_SECS);
+        drop(ledger);
+
+        if let Some(latest) = output.latest_rate_limits {
+            self.keep_newer_rollout_limits(latest);
+        }
     }
 
     fn snapshot(&self, now: i64) -> ProviderSnapshot {
@@ -473,6 +471,30 @@ impl CodexProvider {
         });
     }
 
+    /// Store `latest` unless what is already there was observed later.
+    ///
+    /// Two scans can finish out of order, and a rollout snapshot is only ever a
+    /// fallback for when nothing live answers: the newest one is the only one
+    /// worth keeping, so the older one is dropped rather than published as
+    /// current.
+    fn keep_newer_rollout_limits(&self, latest: (i64, RateLimitSnapshotDto)) {
+        let mut slot = self
+            .rollout_limits
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        if slot.as_ref().is_none_or(|(seen, _)| latest.0 >= *seen) {
+            *slot = Some(latest);
+        }
+    }
+
+    /// The newest rollout-derived snapshot, for the last-resort fallback.
+    fn rollout_limits(&self) -> Option<(i64, RateLimitSnapshotDto)> {
+        self.rollout_limits
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     fn publish(&self, cached: Cached) {
         let earliest_reset_at = cached.windows.iter().filter_map(|w| w.resets_at).min();
         self.scheduling
@@ -507,7 +529,7 @@ impl CodexProvider {
             }
         }
 
-        if let Some((ts, snapshot)) = &inner.last_rollout_rate_limits {
+        if let Some((ts, snapshot)) = &self.rollout_limits() {
             let limit_id = snapshot.limit_id.as_deref().unwrap_or("codex");
             let windows: Vec<UsageWindow> =
                 map_rate_limit_snapshot(limit_id, snapshot, *ts, "rollout")
@@ -777,6 +799,7 @@ impl CodexProvider {
             let fallback = HttpFallback::new(
                 self.env.http_base_url.clone(),
                 format!("token-station/{}", env!("CARGO_PKG_VERSION")),
+                self.env.http_timeouts,
             );
             return match fallback.fetch_usage(&tokens, now).await {
                 Ok(mapping) => Ok(Payload {
@@ -795,5 +818,58 @@ impl CodexProvider {
             };
         }
         Err(auth_error.unwrap_or_else(|| "no codex home with auth.json found".to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ts_core::pricing::shared_bundled;
+
+    fn provider() -> CodexProvider {
+        CodexProvider::with_env(
+            CodexConfig::default(),
+            shared_bundled(),
+            CodexEnv {
+                home: PathBuf::from("/nonexistent"),
+                codex_home: None,
+                binary_override: None,
+                http_base_url: "http://127.0.0.1:1".to_string(),
+                http_timeouts: crate::http_fallback::HttpTimeouts::default(),
+                search: ts_core::discovery::SearchEnv {
+                    path: Some(String::new()),
+                    home: PathBuf::from("/nonexistent"),
+                    user: None,
+                },
+            },
+        )
+    }
+
+    fn snapshot(limit_id: &str) -> RateLimitSnapshotDto {
+        RateLimitSnapshotDto {
+            limit_id: Some(limit_id.to_string()),
+            ..RateLimitSnapshotDto::default()
+        }
+    }
+
+    #[test]
+    fn an_older_rollout_snapshot_never_replaces_a_newer_one() {
+        let provider = provider();
+        provider.keep_newer_rollout_limits((2_000, snapshot("new")));
+        // Two scans can finish out of order; the stale one must not win.
+        provider.keep_newer_rollout_limits((1_000, snapshot("old")));
+        let (ts, kept) = provider.rollout_limits().expect("a snapshot is kept");
+        assert_eq!(ts, 2_000);
+        assert_eq!(kept.limit_id.as_deref(), Some("new"));
+
+        // A later observation does replace it, even with the same timestamp: it
+        // was read from the same file more recently.
+        provider.keep_newer_rollout_limits((2_000, snapshot("same-time")));
+        assert_eq!(
+            provider.rollout_limits().and_then(|(_, s)| s.limit_id),
+            Some("same-time".to_string())
+        );
+        provider.keep_newer_rollout_limits((3_000, snapshot("newest")));
+        assert_eq!(provider.rollout_limits().map(|(ts, _)| ts), Some(3_000));
     }
 }

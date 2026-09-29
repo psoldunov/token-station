@@ -14,4 +14,5 @@ mod rollouts;
 mod windows;
 
 pub use env::CodexEnv;
+pub use http_fallback::HttpTimeouts;
 pub use provider::CodexProvider;

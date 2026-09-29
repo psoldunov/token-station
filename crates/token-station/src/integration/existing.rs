@@ -26,6 +26,28 @@ pub const SYSTEM_DBUS_DIRS: [&str; 2] = ["/usr/share/dbus-1/services", "/etc/dbu
 /// Per-user Nix profiles, relative to `$HOME`.
 const NIX_PROFILES: [&str; 2] = [".nix-profile/share", ".local/state/nix/profile/share"];
 
+/// The system-wide roots searched for a packaged copy of what `setup` installs.
+///
+/// Held as data rather than read from the constants directly so a test can point
+/// them at a temp directory: whether this machine happens to carry a packaged unit
+/// in `/usr/lib` must not decide what a test observes. `Default` is therefore
+/// empty — nothing packaged — and only [`SystemDirs::current`] reads the real ones.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SystemDirs {
+    pub units: Vec<PathBuf>,
+    pub dbus: Vec<PathBuf>,
+}
+
+impl SystemDirs {
+    /// The real directories a distribution or Nix package writes into.
+    pub fn current() -> SystemDirs {
+        SystemDirs {
+            units: SYSTEM_UNIT_DIRS.iter().map(PathBuf::from).collect(),
+            dbus: SYSTEM_DBUS_DIRS.iter().map(PathBuf::from).collect(),
+        }
+    }
+}
+
 /// What an earlier `setup` left behind, and how forceful this run may be.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Previous<'a> {
@@ -94,19 +116,19 @@ pub fn packaged(candidates: &[PathBuf]) -> Option<PathBuf> {
 }
 
 /// Where a packaged systemd user unit called `unit` could already be.
-pub fn unit_candidates(home: &Path, unit: &str) -> Vec<PathBuf> {
-    candidates(&SYSTEM_UNIT_DIRS, home, "systemd/user", unit)
+pub fn unit_candidates(system: &SystemDirs, home: &Path, unit: &str) -> Vec<PathBuf> {
+    candidates(&system.units, home, "systemd/user", unit)
 }
 
 /// Where a packaged D-Bus activation file called `file` could already be.
-pub fn service_candidates(home: &Path, file: &str) -> Vec<PathBuf> {
-    candidates(&SYSTEM_DBUS_DIRS, home, "dbus-1/services", file)
+pub fn service_candidates(system: &SystemDirs, home: &Path, file: &str) -> Vec<PathBuf> {
+    candidates(&system.dbus, home, "dbus-1/services", file)
 }
 
-fn candidates(system: &[&str], home: &Path, suffix: &str, name: &str) -> Vec<PathBuf> {
+fn candidates(system: &[PathBuf], home: &Path, suffix: &str, name: &str) -> Vec<PathBuf> {
     system
         .iter()
-        .map(|dir| Path::new(dir).join(name))
+        .map(|dir| dir.join(name))
         .chain(
             NIX_PROFILES
                 .iter()
@@ -184,13 +206,14 @@ mod tests {
     #[test]
     fn a_packaged_copy_is_found_in_the_system_and_profile_directories() {
         let home = Path::new("/home/u");
-        let units = unit_candidates(home, "token-station.service");
+        let system = SystemDirs::current();
+        let units = unit_candidates(&system, home, "token-station.service");
         assert!(units.contains(&PathBuf::from("/etc/systemd/user/token-station.service")));
         assert!(units.contains(&PathBuf::from(
             "/home/u/.nix-profile/share/systemd/user/token-station.service"
         )));
 
-        let services = service_candidates(home, "dev.soldunov.TokenStation.service");
+        let services = service_candidates(&system, home, "dev.soldunov.TokenStation.service");
         assert!(services.contains(&PathBuf::from(
             "/usr/share/dbus-1/services/dev.soldunov.TokenStation.service"
         )));
@@ -208,5 +231,29 @@ mod tests {
         assert_eq!(packaged(std::slice::from_ref(&absent)), None);
         assert_eq!(packaged(&[absent, present.clone()]), Some(present));
         assert_eq!(packaged(&[]), None);
+    }
+
+    #[test]
+    fn the_search_roots_can_be_pointed_somewhere_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let system = SystemDirs {
+            units: vec![dir.path().join("usr/lib/systemd/user")],
+            dbus: vec![dir.path().join("usr/share/dbus-1/services")],
+        };
+        let units = unit_candidates(&system, Path::new("/home/u"), "token-station.service");
+        assert_eq!(
+            units.first(),
+            Some(
+                &dir.path()
+                    .join("usr/lib/systemd/user/token-station.service")
+            )
+        );
+        // The per-user Nix profiles are still searched, under the given home.
+        assert!(units.iter().any(|p| p.starts_with("/home/u/.nix-profile")));
+        assert!(
+            service_candidates(&system, Path::new("/home/u"), "x.service")
+                .iter()
+                .all(|p| !p.starts_with("/usr"))
+        );
     }
 }

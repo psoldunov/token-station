@@ -1749,6 +1749,7 @@ dependencies = [
  "futures-util",
  "indexmap",
  "ksni",
+ "libc",
  "png",
  "reqwest",
  "rusqlite",

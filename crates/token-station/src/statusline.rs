@@ -8,7 +8,7 @@
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::Child;
-use std::thread::JoinHandle;
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use crate::atomic::write_atomic;
@@ -28,6 +28,9 @@ pub const CALL_TIMEOUT: Duration = Duration::from_millis(150);
 pub const WRAP_TIMEOUT: Duration = Duration::from_secs(5);
 /// How often a running wrapped command is checked on.
 const WRAP_POLL: Duration = Duration::from_millis(5);
+/// How long the reader thread gets to hand over what it already read, once the
+/// process group has been killed and the pipe is closing.
+const WRAP_GRACE: Duration = Duration::from_millis(200);
 
 /// Read at most `cap` bytes; anything beyond is dropped.
 pub fn read_capped(source: &mut impl Read, cap: usize) -> std::io::Result<Vec<u8>> {
@@ -135,18 +138,23 @@ fn deliver_or_drop(payload: &str, paths: &Paths) {
 /// A wrapped status line, running while the D-Bus call happens.
 pub struct Wrapped {
     child: Child,
-    stdout: Option<JoinHandle<Vec<u8>>>,
+    stdout: Option<Receiver<Vec<u8>>>,
 }
 
 /// Start `sh -c command` with `stdin` on its input, reading its output in the
 /// background so neither pipe can deadlock the caller.
+///
+/// The child gets a process group of its own, so [`finish_wrapped`] can kill
+/// everything the command started and not just the `sh` that started it.
 pub fn spawn_wrapped(command: &str, stdin: &[u8]) -> Option<Wrapped> {
+    use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     let mut child = match Command::new("sh")
         .arg("-c")
         .arg(command)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
+        .process_group(0)
         .spawn()
     {
         Ok(child) => child,
@@ -162,33 +170,95 @@ pub fn spawn_wrapped(command: &str, stdin: &[u8]) -> Option<Wrapped> {
             let _ = pipe.write_all(&payload);
         });
     }
-    let stdout = child.stdout.take().map(|mut pipe| {
-        std::thread::spawn(move || {
-            let mut buffer = Vec::new();
-            let _ = pipe.read_to_end(&mut buffer);
-            buffer
-        })
-    });
+    let stdout = child.stdout.take().map(read_in_background);
     Some(Wrapped { child, stdout })
 }
 
+/// Drain `pipe` on a thread of its own, handing the bytes over a channel.
+///
+/// A channel rather than a join handle: joining a thread that is blocked in
+/// `read_to_end` cannot be given up on, and the read only ends when every copy of
+/// the write end is closed — which a grandchild holding stdout never does.
+fn read_in_background(mut pipe: std::process::ChildStdout) -> Receiver<Vec<u8>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = pipe.read_to_end(&mut buffer);
+        let _ = tx.send(buffer);
+    });
+    rx
+}
+
+/// Kill the whole process group the command runs in.
+///
+/// `Child::kill` reaches the `sh` only, so `sleep 12 | cat` would leave the
+/// `sleep` running and holding the stdout pipe open.
+fn kill_group(child: &mut Child) {
+    if let Ok(pid) = i32::try_from(child.id()) {
+        // A negative pid is the group; the group is the child's own, set by
+        // `process_group(0)`, so nothing outside this command is signalled.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// Wait for the wrapped command, killing it after `timeout`, and take its output.
+///
+/// Both halves are bounded: the wait, and the handover of what was read. Claude
+/// Code runs this on every turn, so neither a slow command nor a grandchild
+/// holding the pipe open may keep the status line waiting past `timeout`.
 pub fn finish_wrapped(mut wrapped: Wrapped, timeout: Duration) -> Vec<u8> {
     let deadline = Instant::now() + timeout;
-    while matches!(wrapped.child.try_wait(), Ok(None)) {
+    let exited = wait_or_kill(&mut wrapped.child, deadline);
+    // Once the command itself is gone its own output is already in the pipe, so
+    // only a short handover is owed; anything still holding the write end is
+    // something it started in the background, and waiting on that is waiting for
+    // nothing.
+    let budget = if exited {
+        WRAP_GRACE
+    } else {
+        deadline
+            .saturating_duration_since(Instant::now())
+            .max(WRAP_GRACE)
+    };
+    match wrapped.stdout.take() {
+        Some(stdout) => take_output(&stdout, &mut wrapped.child, budget),
+        None => Vec::new(),
+    }
+}
+
+/// Wait until the child exits, or kill its group at `deadline`. Did it exit?
+fn wait_or_kill(child: &mut Child, deadline: Instant) -> bool {
+    loop {
+        match child.try_wait() {
+            // Exited, or unwaitable: either way there is nothing left to wait for.
+            Ok(Some(_)) | Err(_) => return true,
+            Ok(None) => {}
+        }
         if Instant::now() >= deadline {
             tracing::warn!("the wrapped status line took too long; killing it");
-            let _ = wrapped.child.kill();
-            let _ = wrapped.child.wait();
-            break;
+            kill_group(child);
+            return false;
         }
         std::thread::sleep(WRAP_POLL);
     }
-    wrapped
-        .stdout
-        .take()
-        .and_then(|handle| handle.join().ok())
-        .unwrap_or_default()
+}
+
+/// Take what the reader thread read, giving up rather than waiting on a pipe
+/// something else is still holding open.
+fn take_output(stdout: &Receiver<Vec<u8>>, child: &mut Child, budget: Duration) -> Vec<u8> {
+    match stdout.recv_timeout(budget) {
+        Ok(bytes) => bytes,
+        Err(RecvTimeoutError::Timeout) => {
+            // Something the command started still holds the write end, and only a
+            // signal will close it.
+            tracing::warn!("the wrapped status line still holds its output; killing its group");
+            kill_group(child);
+            stdout.recv_timeout(WRAP_GRACE).unwrap_or_default()
+        }
+        Err(RecvTimeoutError::Disconnected) => Vec::new(),
+    }
 }
 
 /// Run `sh -c command` with `stdin` and return its stdout, whatever it exits with.
@@ -322,6 +392,30 @@ mod tests {
         let out = run_wrapped("printf slow; sleep 30", b"", Duration::from_millis(200));
         assert!(started.elapsed() < Duration::from_secs(5), "it was killed");
         assert_eq!(out, b"slow");
+    }
+
+    #[test]
+    fn a_grandchild_holding_stdout_never_outlives_the_timeout() {
+        // Killing the `sh` is not enough: whatever it started still holds the
+        // write end of stdout, and the read only ends when every copy is closed.
+        // Each of these would otherwise take the grandchild's full 12 s.
+        for (command, timeout, expected) in [
+            // The pipeline keeps `sh` alive, so the whole group is killed at the
+            // timeout and there is nothing to print.
+            ("sleep 12 | cat", Duration::from_millis(300), &b""[..]),
+            // Here `sh` exits at once and a background `sleep` holds the pipe; the
+            // command is gone, so its output comes back on the short grace.
+            ("printf ready; sleep 12 &", WRAP_TIMEOUT, &b"ready"[..]),
+        ] {
+            let started = Instant::now();
+            let out = run_wrapped(command, b"", timeout);
+            assert_eq!(out, expected, "`{command}`");
+            assert!(
+                started.elapsed() < timeout.max(Duration::from_secs(2)),
+                "`{command}` took {:?}",
+                started.elapsed()
+            );
+        }
     }
 
     #[test]

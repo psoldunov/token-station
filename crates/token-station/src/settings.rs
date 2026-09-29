@@ -10,6 +10,22 @@ use crate::atomic::{Unwritable, check_replaceable, write_atomic};
 pub const MANAGED_DECLARATIVELY: &str =
     "config.toml is managed declaratively (e.g. by Nix); change it there";
 
+/// Why [`persist`] did not write the file.
+///
+/// The two are kept apart because the caller can act on them differently: a
+/// managed file is something the user has to change elsewhere, while a failed
+/// write is the daemon's problem and the front end can only report it.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PersistError {
+    /// Somebody else owns `config.toml`; nothing was written.
+    #[error("{MANAGED_DECLARATIVELY}")]
+    Managed,
+    /// The file could not be written — a full disk, a read-only mount, a
+    /// directory in the way.
+    #[error("{0}")]
+    Write(String),
+}
+
 /// Which parts of the daemon a config replacement invalidates.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ConfigChange {
@@ -66,12 +82,15 @@ pub fn parse_settings(json: &str) -> Result<Config, Vec<String>> {
 /// A symlink or a read-only file is somebody else's to change: renaming over it
 /// would replace a `/nix/store` link and the next rebuild would undo the change
 /// anyway, so it is refused instead.
-pub fn persist(config: &Config, path: &Path) -> Result<(), String> {
+pub fn persist(config: &Config, path: &Path) -> Result<(), PersistError> {
     if let Err(Unwritable::Symlink | Unwritable::ReadOnly) = check_replaceable(path) {
-        return Err(MANAGED_DECLARATIVELY.into());
+        return Err(PersistError::Managed);
     }
-    let text = config.to_toml().map_err(|e| e.to_string())?;
-    write_atomic(path, text.as_bytes()).map_err(|e| format!("cannot write {}: {e}", path.display()))
+    let text = config
+        .to_toml()
+        .map_err(|error| PersistError::Write(error.to_string()))?;
+    write_atomic(path, text.as_bytes())
+        .map_err(|error| PersistError::Write(format!("cannot write {}: {error}", path.display())))
 }
 
 /// Re-read `path`, keeping `current` when the file is invalid.
@@ -171,7 +190,7 @@ mod tests {
         for path in [&link, &read_only] {
             assert_eq!(
                 persist(&Config::default(), path).unwrap_err(),
-                MANAGED_DECLARATIVELY,
+                PersistError::Managed,
                 "{}",
                 path.display()
             );
@@ -190,7 +209,10 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::create_dir(&path).unwrap();
         let error = persist(&Config::default(), &path).unwrap_err();
-        assert!(error.contains("cannot write"), "{error}");
+        // A failed write is the daemon's problem, not bad input, and it is told
+        // apart from a file somebody else manages.
+        assert!(matches!(error, PersistError::Write(_)), "{error:?}");
+        assert!(error.to_string().contains("cannot write"), "{error}");
     }
 
     #[test]
