@@ -33,6 +33,19 @@ icon = "hammer"
 command = "if [ \"$(uname -s)\" = Darwin ]; then .ensemblr/scripts/macos.sh check; else nix flake check -L --keep-going; fi"
 icon = "shield-check"
 
+# The Review button. The Swift gates are the same ones CI's macos job runs;
+# Periphery and `swiftlint analyze` need the macOS SDK, so a review on Linux runs
+# them on a Mac.
+[prompts]
+code_review = """
+When the change touches the macOS front end (anything under frontends/macos/, or .ensemblr/scripts/macos.sh), run its static analysis as part of the review:
+
+1. The Swift gate: `.ensemblr/scripts/macos.sh swift-lint`, which runs `swiftlint lint --strict`, `swiftlint analyze --strict` from a compiler log, and `periphery scan --strict`. It needs macOS. The package imports Darwin, AppKit and SwiftUI and does not build on Linux, so Periphery cannot scan it there even when it is on PATH. On a Mac, run it in the worktree. On Linux, copy frontends/macos and .ensemblr/scripts/macos.sh to a reachable Mac with the working tree's uncommitted edits, not only HEAD, keep that layout, and run it there.
+2. On Linux, also run `swiftlint lint --strict` in frontends/macos locally for fast feedback. It is partial: the static Linux build cannot load SourceKit and skips the rules it names in "Skipping enabled rule" warnings. The Mac run is the gate.
+
+Report every SwiftLint and Periphery finding as a review finding, with its file and line, and do not approve while one stands. Never make a finding go away by suppressing it: no `swiftlint:disable`, no `periphery:ignore`, and no new excluded path, disabled rule or retain option in .swiftlint.yml or .periphery.yml. If a finding is a genuine false positive, leave it and say why. If no Mac was reachable, say that the analyzer and Periphery gates did not run; never call the Swift side clean on SwiftLint alone.
+"""
+
 [infisical]
 environment = "dev"
 path = "/"

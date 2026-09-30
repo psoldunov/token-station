@@ -89,6 +89,15 @@ because the Xcode build system writes its index somewhere neither tool looks;
 warning that the flag is deprecated, so both lines come out the day the tools
 read the newer index.
 
+`.ensemblr/scripts/macos.sh swift-lint` runs the three static-analysis steps
+above in one go, and the repository's Review prompt runs it whenever a change
+touches this directory. Only `swiftlint lint` works on Linux, because the
+package imports Darwin, AppKit and SwiftUI and does not build there. Even that
+is partial: the static Linux `swiftlint` cannot load SourceKit, so it skips
+`literal_expression_end_indentation`, `statement_position` and
+`vertical_whitespace_closing_braces` with a warning and still exits zero. Treat
+a Linux run as a quick first pass and the Mac run as the gate.
+
 ## Renders
 
 ```sh
