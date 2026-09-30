@@ -98,6 +98,35 @@ swift run ts-render --fixtures ../../data/fixtures --out /tmp/ts-renders
 
 Renders are a review aid and are not committed.
 
+## App icon
+
+`Resources/AppIcon.icon` is an Icon Composer document: a background gradient,
+a glass group for the two tubes, and a glass group for the Claude and Codex
+levels inside them, each layer an SVG in `Assets/`. macOS 26 and later render it
+live as Liquid Glass, in the default, dark, clear and tinted appearances. Edit
+it in Icon Composer (Xcode > Open Developer Tool) or by hand, then compile it:
+
+```sh
+scripts/make-icon.sh    # Xcode 26 or later
+```
+
+That writes `Resources/Assets.car` — the layered icon, plus the flat renditions
+macOS 14 and 15 read through `CFBundleIconName` — and `Resources/AppIcon.icns`,
+the `CFBundleIconFile` fallback. Both are committed; `build-app.sh` only copies
+them. To look at one appearance without building the app:
+
+```sh
+ictool="/Applications/Xcode.app/Contents/Applications/Icon Composer.app/Contents/Executables/ictool"
+"$ictool" Resources/AppIcon.icon --export-image --output-file /tmp/icon-dark.png \
+  --platform macOS --rendition Dark --width 512 --height 512 --scale 1
+```
+
+The renditions are `Default`, `Dark`, `TintedLight`, `TintedDark`, `ClearLight`
+and `ClearDark`; the tinted ones also take `--tint-color` and `--tint-strength`.
+
+The Linux icon, `data/icons/hicolor/scalable/apps/dev.soldunov.TokenStation.svg`,
+paints the same design flat, so change the two together.
+
 ## Development against a daemon
 
 ```sh

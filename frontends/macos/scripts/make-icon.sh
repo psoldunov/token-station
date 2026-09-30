@@ -1,29 +1,60 @@
 #!/usr/bin/env bash
-# Regenerate Resources/AppIcon.icns from Resources/AppIcon.svg.
+# Regenerate Resources/Assets.car and Resources/AppIcon.icns from Resources/AppIcon.icon.
 #
-# Runs on macOS (iconutil ships with the OS) and needs rsvg-convert, from
-# `brew install librsvg` or `nix shell nixpkgs#librsvg`. The .icns is committed,
-# so building the app never needs either tool.
+# AppIcon.icon is an Icon Composer document: a background fill and two groups of
+# SVG layers (the tubes, and the Claude and Codex levels) that macOS 26 and later
+# draw as Liquid Glass, in the default, dark, clear and tinted appearances. Open it
+# in Icon Composer (Xcode > Open Developer Tool) or edit it by hand. actool
+# compiles it the way Xcode does for an app target:
+#
+#   Assets.car    The layered icon for macOS 26 and later, plus a flat rendition
+#                 at every app icon size, which macOS 14 and 15 find through
+#                 CFBundleIconName.
+#   AppIcon.icns  The CFBundleIconFile fallback for readers that ignore the
+#                 asset catalog.
+#
+# Runs on macOS with Xcode 26 or later; an older actool cannot read an .icon
+# document. Both outputs are committed, so building the app never needs this.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-svg="$here/Resources/AppIcon.svg"
-icns="$here/Resources/AppIcon.icns"
+resources="$here/Resources"
+icon="$resources/AppIcon.icon"
 
-command -v rsvg-convert >/dev/null || { echo "rsvg-convert not found (brew install librsvg)" >&2; exit 1; }
-command -v iconutil >/dev/null || { echo "iconutil not found; run this on macOS" >&2; exit 1; }
+[[ "$(uname -s)" == Darwin ]] || { echo "make-icon.sh: run this on macOS" >&2; exit 1; }
+
+# actool ships with Xcode, not with the Command Line Tools.
+if ! /usr/bin/xcrun --find actool >/dev/null 2>&1; then
+  if [[ -d /Applications/Xcode.app/Contents/Developer ]]; then
+    export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+  else
+    echo "make-icon.sh: actool not found; install Xcode 26 or later" >&2
+    exit 1
+  fi
+fi
+
+# The flat renditions have to reach back as far as the app itself does.
+minimum="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$resources/Info.plist")"
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
-iconset="$work/AppIcon.iconset"
-mkdir "$iconset"
 
-# Every size macOS asks an app icon for, at 1x and 2x.
-for size in 16 32 128 256 512; do
-  rsvg-convert -w "$size" -h "$size" "$svg" -o "$iconset/icon_${size}x${size}.png"
-  double=$((size * 2))
-  rsvg-convert -w "$double" -h "$double" "$svg" -o "$iconset/icon_${size}x${size}@2x.png"
+/usr/bin/xcrun actool "$icon" \
+  --compile "$work" \
+  --app-icon AppIcon \
+  --platform macosx \
+  --target-device mac \
+  --minimum-deployment-target "$minimum" \
+  --development-region en \
+  --enable-on-demand-resources NO \
+  --output-partial-info-plist "$work/partial.plist" \
+  --output-format human-readable-text --errors --warnings
+
+# actool succeeds without writing an icon when --app-icon names none in the
+# document, so make sure both outputs exist before replacing the committed ones.
+for output in Assets.car AppIcon.icns; do
+  [[ -s "$work/$output" ]] || { echo "make-icon.sh: actool wrote no $output" >&2; exit 1; }
 done
 
-iconutil --convert icns --output "$icns" "$iconset"
-echo "wrote $icns"
+cp "$work/Assets.car" "$work/AppIcon.icns" "$resources/"
+echo "wrote $resources/Assets.car and $resources/AppIcon.icns (macOS $minimum and later)"

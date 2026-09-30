@@ -147,11 +147,16 @@ fi
 sed -e "s/@SHORT_VERSION@/$short_version/g" -e "s/@BUNDLE_VERSION@/$numeric_version/g" \
 	"$macos_dir/Resources/Info.plist" >"$app/Contents/Info.plist"
 
-if [[ -f "$macos_dir/Resources/AppIcon.icns" ]]; then
-	cp "$macos_dir/Resources/AppIcon.icns" "$app/Contents/Resources/AppIcon.icns"
-else
-	echo "    (no Resources/AppIcon.icns yet; the bundle goes out without one)"
-fi
+# The icon, compiled from Resources/AppIcon.icon by scripts/make-icon.sh: the
+# asset catalog Info.plist names in CFBundleIconName, and the .icns that
+# CFBundleIconFile falls back to.
+for icon_file in Assets.car AppIcon.icns; do
+	if [[ -f "$macos_dir/Resources/$icon_file" ]]; then
+		cp "$macos_dir/Resources/$icon_file" "$app/Contents/Resources/$icon_file"
+	else
+		echo "    (no Resources/$icon_file; run scripts/make-icon.sh)"
+	fi
+done
 
 printf 'APPL????' >"$app/Contents/PkgInfo"
 
