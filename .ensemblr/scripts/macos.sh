@@ -96,13 +96,21 @@ test_macos() {
 
 lint_macos() {
     require_tool cargo
+
+    (cd "$repo" && cargo fmt --all --check)
+    (cd "$repo" && cargo clippy --workspace --all-targets --locked -- --deny warnings)
+    lint_swift
+}
+
+# The Swift half on its own, for a review that only needs the front end's gates:
+# it touches nothing outside frontends/macos, so a copy of that directory and
+# this script is enough to run it on another Mac.
+lint_swift() {
     require_tool swift
     require_tool swiftlint
     require_tool periphery
     use_xcode
 
-    (cd "$repo" && cargo fmt --all --check)
-    (cd "$repo" && cargo clippy --workspace --all-targets --locked -- --deny warnings)
     analysis_dir="$(mktemp -d "${TMPDIR:-/tmp}/token-station-analyze.XXXXXX")"
     (
         cd "$macos"
@@ -135,6 +143,9 @@ test)
 lint)
     lint_macos
     ;;
+swift-lint)
+    lint_swift
+    ;;
 build)
     shift
     build_macos "$@"
@@ -145,7 +156,7 @@ check)
     build_macos --zip
     ;;
 *)
-    echo "usage: $0 setup|preview [fixture]|test|lint|build [--universal] [--zip]|check" >&2
+    echo "usage: $0 setup|preview [fixture]|test|lint|swift-lint|build [--universal] [--zip]|check" >&2
     exit 2
     ;;
 esac
