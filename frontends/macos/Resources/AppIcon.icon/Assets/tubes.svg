@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <!-- A glass cylinder catches light at both walls and lets it through the middle. -->
+    <linearGradient id="wall" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".7"/>
+      <stop offset=".12" stop-color="#ffffff" stop-opacity=".35"/>
+      <stop offset=".3" stop-color="#ffffff" stop-opacity=".08"/>
+      <stop offset=".72" stop-color="#ffffff" stop-opacity=".04"/>
+      <stop offset=".92" stop-color="#ffffff" stop-opacity=".2"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity=".5"/>
+    </linearGradient>
+  </defs>
+  <rect x="240" y="216" width="240" height="592" rx="120" fill="url(#wall)"/>
+  <rect x="544" y="216" width="240" height="592" rx="120" fill="url(#wall)"/>
+</svg>

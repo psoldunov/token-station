@@ -12,6 +12,8 @@
 	<string>TokenStation</string>
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
+	<key>CFBundleIconName</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>dev.soldunov.TokenStation</string>
 	<key>CFBundleInfoDictionaryVersion</key>
